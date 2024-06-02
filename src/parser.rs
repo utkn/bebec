@@ -1,4 +1,4 @@
-use winnow::ascii::{digit1, multispace1};
+use winnow::ascii::digit1;
 use winnow::combinator::{alt, opt, preceded, terminated};
 use winnow::error::ParserError;
 use winnow::prelude::*;
@@ -29,7 +29,7 @@ fn word<'a>(s: &mut &'a str) -> PResult<&'a str> {
 /// A parser for a pattern.
 fn pattern<'a>(s: &mut &'a str) -> PResult<Pattern<'a>> {
     delimited('(', (separated(0.., ws(word), ','), opt(ws(','))), ')')
-        .map(|(names, _): (Vec<_>, _)| Pattern::NameTuple(names))
+        .map(|(names, _): (Vec<_>, _)| Pattern::Names(names))
         .parse_next(s)
 }
 
@@ -64,6 +64,15 @@ fn expr_new_primitive<'a>(s: &mut &'a str) -> PResult<Expr<'a>> {
         ("nil").map(|_| Expr::NewPrimitive(Primitive::Nil)),
     ))
     .parse_next(s)
+}
+
+fn expr_access<'a>(s: &mut &'a str) -> PResult<Expr<'a>> {
+    delimited('(', (terminated(expr, '.'), word), ')')
+        .map(|(expr, field_name)| Expr::Access {
+            lhs: Box::new(expr),
+            field_name,
+        })
+        .parse_next(s)
 }
 
 /// A parser for a new function expression.
@@ -168,6 +177,7 @@ fn expr<'a>(s: &mut &'a str) -> PResult<Expr<'a>> {
         expr_if,
         expr_new_primitive,
         expr_call,
+        expr_access,
         word.map(|s| Expr::Ref(s)),
     ))
     .parse_next(s)

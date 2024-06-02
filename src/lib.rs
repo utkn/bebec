@@ -84,15 +84,12 @@ mod tests {
             r#"{
                 let Employee = func(hours, salary) (hours=hours, salary=salary);
                 let utkan = Employee(hours=1000, salary=0);
-                utkan
+                ((utkan.hours), (utkan.salary))
             }"#,
         )
         .unwrap()
         .eval(&mut ctx)
         .unwrap();
-        assert_eq!(
-            res,
-            HashMap::from_iter([("hours", 1000), ("salary", 0),]).into()
-        )
+        assert_eq!(res, (1000, 0).into())
     }
 }

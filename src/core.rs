@@ -55,6 +55,10 @@ impl<'a> NamedTuple<'a> {
         }
         Some(vals.into_iter().collect())
     }
+
+    pub fn get(&self, field_name: &str) -> Option<&Val<'a>> {
+        self.0.get(field_name)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, strum::EnumTryAs)]
@@ -84,19 +88,20 @@ pub enum DestructError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pattern<'a> {
-    NameTuple(Vec<&'a str>),
+    Names(Vec<&'a str>),
+    TypeFields(Vec<&'a str>),
 }
 
 impl<'a> Pattern<'a> {
     pub fn destruct_into_ctx(&self, val: Val<'a>, ctx: &mut Ctx<'a>) -> Result<(), DestructError> {
         match (self, val) {
-            (Pattern::NameTuple(names), Val::Tuple(Tuple::Ordered(OrderedTuple(vals)))) => {
+            (Pattern::Names(names), Val::Tuple(Tuple::Ordered(OrderedTuple(vals)))) => {
                 for (name, val) in names.iter().zip(vals.into_iter()) {
                     ctx.extend_local(*name, val);
                 }
                 Ok(())
             }
-            (Pattern::NameTuple(names), Val::Tuple(Tuple::Named(NamedTuple(mut pairs)))) => {
+            (Pattern::Names(names), Val::Tuple(Tuple::Named(NamedTuple(mut pairs)))) => {
                 if names.len() != pairs.len() {
                     return Err(DestructError::DifferentLengths(names.len(), pairs.len()));
                 }
@@ -241,6 +246,10 @@ pub enum EvalError {
     InvalidReference(String),
     #[error("expected a conditional in the if expression")]
     NotAConditional,
+    #[error("invalid field `{0}`")]
+    InvalidField(String),
+    #[error("trying to access the field of a value that is not a named tuple")]
+    NotANamedTuple,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -268,6 +277,10 @@ pub enum Expr<'a> {
         cond: Box<Expr<'a>>,
         main_branch: Box<Expr<'a>>,
         else_branch: Option<Box<Expr<'a>>>,
+    },
+    Access {
+        lhs: Box<Expr<'a>>,
+        field_name: &'a str,
     },
 }
 
@@ -298,6 +311,17 @@ impl<'a> Expr<'a> {
                 body: *body,
                 captured_ctx: ctx.clone(),
             }))),
+            Expr::Access { lhs, field_name } => {
+                let lhs = lhs.eval(ctx)?;
+                let lhs = lhs
+                    .try_as_tuple()
+                    .and_then(|t| t.try_as_named())
+                    .ok_or(EvalError::NotANamedTuple)?;
+                let field = lhs
+                    .get(field_name)
+                    .ok_or(EvalError::InvalidField(field_name.into()))?;
+                Ok(field.clone())
+            }
             Expr::Call { func_name, arg } => match ctx.get(func_name).cloned() {
                 Some(Val::Func(func)) => func
                     .call(Some(arg.eval(ctx)?))
@@ -324,8 +348,7 @@ impl<'a> Expr<'a> {
                 if cond
                     .eval(ctx)?
                     .try_as_primitive()
-                    .ok_or(EvalError::NotAConditional)?
-                    .try_as_bool()
+                    .and_then(|p| p.try_as_bool())
                     .ok_or(EvalError::NotAConditional)?
                 {
                     main_branch.eval(ctx)
