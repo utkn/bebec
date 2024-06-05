@@ -320,10 +320,7 @@ impl<'a> Expr<'a, Typed<'a>> {
                 field_name,
             } => {
                 let lhs = lhs.eval(ctx)?;
-                let lhs = lhs
-                    .try_as_tuple()
-                    .and_then(|t| t.try_as_named())
-                    .ok_or(EvalError::NotANamedTuple)?;
+                let lhs = lhs.try_as_named_tuple().ok_or(EvalError::NotANamedTuple)?;
                 let field = lhs
                     .get(field_name)
                     .ok_or(EvalError::InvalidField(field_name.into()))?;

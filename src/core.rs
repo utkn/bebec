@@ -122,7 +122,7 @@ impl<'a> Pattern<'a> {
                     false
                 }
             }
-            (Pattern::Single(_, t), _) => {
+            (Pattern::Single(_, t), val_type) => {
                 let unwrapped_type = if val_type != t {
                     val_type.unwrap_singular_tuple()
                 } else {
@@ -167,7 +167,7 @@ impl<'a> Pattern<'a> {
         val_ctx: &mut ValCtx<'a>,
     ) -> Result<(), DestructError> {
         match (self, val) {
-            (Pattern::Single(name, _), Val::Tuple(Tuple::Named(NamedTuple(mut pairs)))) => {
+            (Pattern::Single(name, _), Val::NamedTuple(NamedTuple(mut pairs))) => {
                 let tpl_val = pairs
                     .remove(name)
                     .ok_or(DestructError::UnsatisfiedName(name.to_string()))?;
@@ -189,7 +189,7 @@ impl<'a> Pattern<'a> {
                     ));
                 }
             }
-            (Pattern::Tuple(pats), Val::Tuple(Tuple::Ordered(OrderedTuple(vals))))
+            (Pattern::Tuple(pats), Val::OrderedTuple(OrderedTuple(vals)))
                 if pats.len() == vals.len() =>
             {
                 for (pat, val) in pats.iter().zip(vals.into_iter()) {
@@ -197,14 +197,11 @@ impl<'a> Pattern<'a> {
                 }
                 Ok(())
             }
-            (Pattern::Tuple(pats), Val::Tuple(Tuple::Named(NamedTuple(pairs))))
+            (Pattern::Tuple(pats), Val::NamedTuple(NamedTuple(pairs)))
                 if pats.len() == pairs.len() =>
             {
                 for pat in pats {
-                    pat.destruct_vals(
-                        Val::Tuple(Tuple::Named(NamedTuple(pairs.clone()))),
-                        val_ctx,
-                    )?;
+                    pat.destruct_vals(Val::NamedTuple(NamedTuple(pairs.clone())), val_ctx)?;
                 }
                 Ok(())
             }
@@ -284,11 +281,12 @@ impl<'a> Func<'a, Typed<'a>> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, strum::EnumTryAs)]
+#[derive(Clone, Debug, PartialEq, Eq, strum::EnumTryAs, strum::EnumIs)]
 pub enum Val<'a> {
     Primitive(Primitive),
     Func(Func<'a, Typed<'a>>),
-    Tuple(Tuple<'a>),
+    OrderedTuple(OrderedTuple<'a>),
+    NamedTuple(NamedTuple<'a>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, strum::EnumTryAs)]
@@ -316,13 +314,13 @@ impl<'a> ValType<'a> {
 impl<'a> Val<'a> {
     /// Returns a `nil` value, i.e., an empty ordered tuple.
     pub fn nil() -> Self {
-        Val::Tuple(Tuple::Ordered(OrderedTuple(Default::default())))
+        Val::OrderedTuple(OrderedTuple(Default::default()))
     }
 
     /// Returns true iff this value is of type `nil`.
     pub fn is_nil(&self) -> bool {
         match self {
-            Val::Tuple(Tuple::Ordered(OrderedTuple(vals))) if vals.is_empty() => true,
+            Val::OrderedTuple(OrderedTuple(vals)) if vals.is_empty() => true,
             _ => false,
         }
     }
@@ -331,8 +329,8 @@ impl<'a> Val<'a> {
     pub fn get_type(&self) -> ValType<'a> {
         match self {
             Val::Primitive(p) => p.get_type(),
-            Val::Tuple(Tuple::Ordered(t)) => t.get_type(),
-            Val::Tuple(Tuple::Named(t)) => t.get_type(),
+            Val::OrderedTuple(t) => t.get_type(),
+            Val::NamedTuple(t) => t.get_type(),
             Val::Func(Func::Intern(InternFunc { ret_type, .. }))
             | Val::Func(Func::Extern(ExternFunc { ret_type, .. })) => {
                 ValType::Func(Box::new(ret_type.clone()))
@@ -343,7 +341,7 @@ impl<'a> Val<'a> {
     pub fn unwrap_singular_tuple(self) -> Self {
         match self {
             // Coerce a tuple with a single element into the inner value
-            Val::Tuple(Tuple::Ordered(OrderedTuple(mut t))) if t.len() == 1 => {
+            Val::OrderedTuple(OrderedTuple(mut t)) if t.len() == 1 => {
                 t.remove(0).unwrap_singular_tuple()
             }
             _ => self,
@@ -359,10 +357,15 @@ impl<'a> Val<'a> {
     where
         T: Representible<'a>,
     {
-        let ordered = match self.try_as_tuple()? {
-            Tuple::Named(tpl) => tpl.as_ordered(ordered_names)?,
-            Tuple::Ordered(tpl) => tpl,
+        let ordered = if self.is_named_tuple() {
+            self.try_as_named_tuple()
+                .unwrap()
+                .as_ordered(ordered_names)?
+        } else if let Some(tpl) = self.try_as_ordered_tuple() {
+            tpl
+        } else {
+            return None;
         };
-        T::try_from_val(Val::Tuple(Tuple::Ordered(ordered)))
+        T::try_from_val(Val::OrderedTuple(ordered))
     }
 }

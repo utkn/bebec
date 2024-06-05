@@ -17,7 +17,7 @@ macro_rules! create_tuple_impl {
         $( $ts : Representible<'a> ),+
         {
             fn try_from_val(val: Val<'a>) -> Option<Self> {
-                let mut it = val.try_as_tuple()?.try_as_ordered()?.into_iter();
+                let mut it = val.try_as_ordered_tuple()?.into_iter();
                 Some(($( $ts::try_from_val(it.next()?)? ),+,))
             }
 
@@ -25,7 +25,7 @@ macro_rules! create_tuple_impl {
                 let vals = [
                     $( self.$ids.to_val() ),+
                 ];
-                Val::Tuple(Tuple::Ordered(vals.into_iter().collect()))
+                Val::OrderedTuple(vals.into_iter().collect())
             }
         }
     };
@@ -58,11 +58,11 @@ create_tuple_impl!(
 
 impl<'a> Representible<'a> for NamedTuple<'a> {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
-        val.try_as_tuple()?.try_as_named()
+        val.try_as_named_tuple()
     }
 
     fn to_val(self) -> Val<'a> {
-        Val::Tuple(Tuple::Named(self))
+        Val::NamedTuple(self)
     }
 }
 
@@ -77,21 +77,11 @@ where
 
 impl<'a> Representible<'a> for OrderedTuple<'a> {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
-        val.try_as_tuple()?.try_as_ordered()
+        val.try_as_ordered_tuple()
     }
 
     fn to_val(self) -> Val<'a> {
-        Val::Tuple(Tuple::Ordered(self))
-    }
-}
-
-impl<'a> Representible<'a> for Tuple<'a> {
-    fn try_from_val(val: Val<'a>) -> Option<Self> {
-        val.try_as_tuple()
-    }
-
-    fn to_val(self) -> Val<'a> {
-        Val::Tuple(self)
+        Val::OrderedTuple(self)
     }
 }
 
@@ -163,16 +153,14 @@ where
 {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
         let mut seq = Self::new();
-        for v in val.try_as_tuple()?.try_as_ordered()? {
+        for v in val.try_as_ordered_tuple()? {
             seq.push(T::try_from_val(v)?);
         }
         Some(seq)
     }
 
     fn to_val(self) -> Val<'a> {
-        Val::Tuple(Tuple::Ordered(OrderedTuple::from_iter(
-            self.into_iter().map_into(),
-        )))
+        Val::OrderedTuple(OrderedTuple::from_iter(self.into_iter().map_into()))
     }
 }
 
@@ -182,15 +170,15 @@ where
 {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
         let mut map = Self::new();
-        for (k, v) in val.try_as_tuple()?.try_as_named()? {
+        for (k, v) in val.try_as_named_tuple()? {
             map.insert(k, T::try_from_val(v)?);
         }
         Some(map)
     }
 
     fn to_val(self) -> Val<'a> {
-        Val::Tuple(Tuple::Named(NamedTuple::from_iter(
+        Val::NamedTuple(NamedTuple::from_iter(
             self.into_iter().map(|(k, v)| (k, v.into())),
-        )))
+        ))
     }
 }
