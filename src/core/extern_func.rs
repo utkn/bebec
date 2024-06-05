@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use super::Val;
+use super::{Pattern, Val, ValType};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExternCallError {
@@ -13,21 +13,23 @@ pub enum ExternCallError {
 }
 
 pub trait ExternCallable<'a> {
-    fn call(&self, arg: Option<Val<'a>>) -> Result<Val<'a>, ExternCallError>;
+    fn call(&self, arg: Val<'a>) -> Result<Val<'a>, ExternCallError>;
 }
 
 impl<'a, T> ExternCallable<'a> for T
 where
-    T: Fn(Option<Val<'a>>) -> Result<Val<'a>, ExternCallError>,
+    T: Fn(Val<'a>) -> Result<Val<'a>, ExternCallError>,
 {
-    fn call(&self, arg: Option<Val<'a>>) -> Result<Val<'a>, ExternCallError> {
+    fn call(&self, arg: Val<'a>) -> Result<Val<'a>, ExternCallError> {
         (self)(arg)
     }
 }
 
 #[derive(Clone)]
 pub struct ExternFunc<'a> {
-    pub(super) name: &'a str,
+    pub(super) arg_pattern: Pattern<'a>,
+    pub(super) ret_type: ValType<'a>,
+    pub(super) func_name: &'a str,
     pub(super) body: &'a dyn ExternCallable<'a>,
 }
 
@@ -35,20 +37,19 @@ impl<'a> std::cmp::Eq for ExternFunc<'a> {}
 
 impl<'a> std::cmp::PartialEq for ExternFunc<'a> {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
+        self.func_name == other.func_name
     }
 }
 
 impl<'a> std::fmt::Debug for ExternFunc<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name)
+        f.write_str(self.func_name)
     }
 }
 
 macro_rules! extern_func {
     (( $( $ids:ident : $ts: ty ),+ ) => $body:expr) => {
-        |val: Option<Val<'_>>| -> Result<Val<'_>, ExternCallError> {
-            let val = val.ok_or(ExternCallError::NoArgsProvided)?;
+        |val: Val<'_>| -> Result<Val<'_>, ExternCallError> {
             let ($($ids),+,): ($($ts),+,) = val
                 .try_destruct_tuple([
                     $(stringify!($ids)),+

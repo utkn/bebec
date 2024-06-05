@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::core::{Expr, Pattern, Primitive};
+use crate::core::{Expr, Pattern, Primitive, Untyped, ValType};
 
 const SYMBOLS: &[&str] = &[
     "=", // assignment
@@ -8,7 +8,7 @@ const SYMBOLS: &[&str] = &[
     "+", "-", "*", "/", "**", // arithmetic
     "[", "]", "(", ")", "{", "}", // delimiters
     ".", // access
-    ";", ",", // misc
+    ";", ",", ":", // misc
 ];
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -98,20 +98,45 @@ impl<'a> PrattParser<'a> {
         }
     }
 
+    fn parse_type(&mut self) -> Option<ValType<'a>> {
+        match self.lexer.peek() {
+            Some(Token::Word("bool")) => {
+                self.lexer.next().unwrap();
+                Some(ValType::Bool)
+            }
+            Some(Token::Word("uint")) => {
+                self.lexer.next().unwrap();
+                Some(ValType::Uint)
+            }
+            Some(Token::Word("char")) => {
+                self.lexer.next().unwrap();
+                Some(ValType::Char)
+            }
+            Some(Token::Word("str")) => {
+                self.lexer.next().unwrap();
+                Some(ValType::String)
+            }
+            _ => None,
+        }
+    }
+
     fn parse_pattern(&mut self) -> Option<Pattern<'a>> {
+        // TODO make it recursive !!!!
         self.try_consume(|t| t == Token::Symbol("("))?;
-        let mut names = Vec::new();
+        let mut single_pats = Vec::new();
         while let Some(t) = self.try_consume(|t| matches!(t, Token::Word(_))) {
-            names.push(t.contents());
+            let pat_name = t.contents();
+            let pat_type = self.parse_type()?;
+            single_pats.push(Pattern::Single(pat_name, pat_type));
             if self.try_consume(|t| t == Token::Symbol(",")).is_none() {
                 break;
             }
         }
         self.try_consume(|t| t == Token::Symbol(")"))?;
-        Some(Pattern::Names(names))
+        Some(Pattern::Tuple(single_pats))
     }
 
-    fn parse_new_tuple_expr(&mut self) -> Option<Expr<'a>> {
+    fn parse_new_tuple_expr(&mut self) -> Option<Expr<'a, Untyped>> {
         self.try_consume(|t| t == Token::Symbol("("))?;
         let is_named = {
             let mut test = self.clone();
@@ -133,7 +158,7 @@ impl<'a> PrattParser<'a> {
                 }
             }
             self.try_consume(|t| t == Token::Symbol(")"))?;
-            Some(Expr::NewNamedTuple(exprs))
+            Some(Expr::NewNamedTuple(Untyped, exprs))
         } else {
             let mut exprs = Vec::new();
             while let Some(expr) = self.parse_expr(0) {
@@ -143,11 +168,11 @@ impl<'a> PrattParser<'a> {
                 }
             }
             self.try_consume(|t| t == Token::Symbol(")"))?;
-            Some(Expr::NewOrderedTuple(exprs))
+            Some(Expr::NewOrderedTuple(Untyped, exprs))
         }
     }
 
-    fn parse_let_expr(&mut self) -> Option<Expr<'a>> {
+    fn parse_let_expr(&mut self) -> Option<Expr<'a, Untyped>> {
         self.try_consume(|t| t == Token::Word("let"))?;
         let binding_name = self
             .try_consume(|t| matches!(t, Token::Word(_)))?
@@ -155,12 +180,13 @@ impl<'a> PrattParser<'a> {
         self.try_consume(|t| t == Token::Symbol("="))?;
         let rhs = self.parse_expr(0)?;
         return Some(Expr::Let {
+            ret_type: Untyped,
             name: binding_name,
             rhs: Box::new(rhs),
         });
     }
 
-    fn parse_if_expr(&mut self) -> Option<Expr<'a>> {
+    fn parse_if_expr(&mut self) -> Option<Expr<'a, Untyped>> {
         self.try_consume(|t| t == Token::Word("if"))?;
         let cond = self.parse_expr(0)?;
         let main_branch = self.parse_expr(0)?;
@@ -171,33 +197,34 @@ impl<'a> PrattParser<'a> {
             None
         };
         return Some(Expr::If {
+            ret_type: Untyped,
             cond: Box::new(cond),
             main_branch: Box::new(main_branch),
             else_branch: else_branch.map(|b| Box::new(b)),
         });
     }
 
-    fn parse_new_func_expr(&mut self) -> Option<Expr<'a>> {
+    fn parse_new_func_expr(&mut self) -> Option<Expr<'a, Untyped>> {
         self.lexer.next()?;
-        let pattern = self.parse_pattern();
+        let arg_pattern = self.parse_pattern()?;
         let body = self.parse_expr(0)?;
         return Some(Expr::NewFunc {
-            arg_pattern: pattern,
+            ret_type: Untyped,
+            arg_pattern,
             body: Box::new(body),
         });
     }
 
-    pub fn parse_expr(&mut self, min_bp: usize) -> Option<Expr<'a>> {
+    pub fn parse_expr(&mut self, min_bp: usize) -> Option<Expr<'a, Untyped>> {
         let mut lhs = match self.lexer.peek() {
             Some(Token::Numeric(num)) => {
                 self.lexer.next().unwrap();
-                Expr::NewPrimitive(Primitive::Uint(num.parse().ok()?))
+                Expr::NewPrimitive(Untyped, Primitive::Uint(num.parse().ok()?))
             }
             Some(Token::Word("true")) | Some(Token::Word("false")) => {
-                let v = self.lexer.next().unwrap().contents();
-                Expr::NewPrimitive(Primitive::Bool(v.parse().ok()?))
+                let bool_val = self.lexer.next().unwrap().contents();
+                Expr::NewPrimitive(Untyped, Primitive::Bool(bool_val.parse().ok()?))
             }
-            Some(Token::Word("nil")) => Expr::NewPrimitive(Primitive::Nil),
             Some(Token::Word("let")) => self.parse_let_expr()?,
             Some(Token::Word("if")) => self.parse_if_expr()?,
             Some(Token::Word("func")) => self.parse_new_func_expr()?,
@@ -212,17 +239,21 @@ impl<'a> PrattParser<'a> {
                     }
                 }
                 self.try_consume(|t| t == Token::Symbol("}"))?;
-                Expr::Block { exprs }
+                Expr::Block {
+                    ret_type: Untyped,
+                    exprs,
+                }
             }
             Some(Token::Word(s)) => {
                 self.lexer.next().unwrap();
-                Expr::Ref(s)
+                Expr::Ref(Untyped, s)
             }
             Some(Token::Symbol(s)) if prefix_binding(s).is_some() => {
                 self.lexer.next().unwrap();
                 let prefix_binding = prefix_binding(s).unwrap();
                 let rhs = self.parse_expr(prefix_binding)?;
                 Expr::Call {
+                    ret_type: Untyped,
                     func_name: s,
                     arg: Box::new(rhs),
                 }
@@ -239,24 +270,27 @@ impl<'a> PrattParser<'a> {
                     let (_, r_bp) = infix_binding(op).unwrap();
                     let rhs = self.parse_expr(r_bp)?;
                     lhs = match rhs {
-                        Expr::Ref(field_name) if op == "." => Expr::Access {
+                        Expr::Ref(_, field_name) if op == "." => Expr::Access {
+                            ret_type: Untyped,
                             lhs: Box::new(lhs),
                             field_name,
                         },
                         _ => Expr::Call {
+                            ret_type: Untyped,
                             func_name: op,
-                            arg: Box::new(Expr::NewOrderedTuple(vec![lhs, rhs])),
+                            arg: Box::new(Expr::NewOrderedTuple(Untyped, vec![lhs, rhs])),
                         },
                     }
                 }
                 _ => match lhs {
                     // another expression after a ref expression
                     // treat the callee as a prefix operator with a binding of `CALL_BINDING`
-                    Expr::Ref(r) => {
+                    Expr::Ref(_, r) => {
                         let Some(arg) = self.parse_expr(CALL_BINDING) else {
                             break;
                         };
                         lhs = Expr::Call {
+                            ret_type: Untyped,
                             func_name: r,
                             arg: Box::new(arg),
                         }
@@ -294,7 +328,7 @@ fn infix_binding(s: &str) -> Option<(usize, usize)> {
 #[error("error while parsing {0}")]
 pub struct ParseError(String);
 
-impl<'a> Expr<'a> {
+impl<'a> Expr<'a, Untyped> {
     pub fn parse(s: &'a str) -> Result<Self, ParseError> {
         PrattParser::new(Lexer::new(s))
             .parse_expr(0)

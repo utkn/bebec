@@ -97,7 +97,7 @@ impl<'a> Representible<'a> for Tuple<'a> {
 
 impl<'a> Representible<'a> for () {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
-        if val.try_as_coerced_primitive()?.is_nil() {
+        if val.is_nil() {
             Some(())
         } else {
             None
@@ -105,13 +105,15 @@ impl<'a> Representible<'a> for () {
     }
 
     fn to_val(self) -> Val<'a> {
-        Val::Primitive(Primitive::Nil)
+        Val::nil()
     }
 }
 
 impl<'a> Representible<'a> for bool {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
-        val.try_as_coerced_primitive()?.try_as_bool()
+        val.unwrap_singular_tuple()
+            .try_as_primitive()?
+            .try_as_bool()
     }
 
     fn to_val(self) -> Val<'a> {
@@ -121,7 +123,9 @@ impl<'a> Representible<'a> for bool {
 
 impl<'a> Representible<'a> for usize {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
-        val.try_as_coerced_primitive()?.try_as_uint()
+        val.unwrap_singular_tuple()
+            .try_as_primitive()?
+            .try_as_uint()
     }
 
     fn to_val(self) -> Val<'a> {
@@ -131,7 +135,9 @@ impl<'a> Representible<'a> for usize {
 
 impl<'a> Representible<'a> for char {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
-        val.try_as_coerced_primitive()?.try_as_char()
+        val.unwrap_singular_tuple()
+            .try_as_primitive()?
+            .try_as_char()
     }
 
     fn to_val(self) -> Val<'a> {
@@ -141,7 +147,9 @@ impl<'a> Representible<'a> for char {
 
 impl<'a> Representible<'a> for String {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
-        val.try_as_coerced_primitive()?.try_as_string()
+        val.unwrap_singular_tuple()
+            .try_as_primitive()?
+            .try_as_string()
     }
 
     fn to_val(self) -> Val<'a> {

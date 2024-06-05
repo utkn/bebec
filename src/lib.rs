@@ -4,11 +4,11 @@ mod types;
 
 #[cfg(test)]
 mod tests {
-    use crate::core::{extern_func, Ctx, Expr, ExternCallError, Val};
+    use crate::core::{extern_func, Expr, ExternCallError, Pattern, Val, ValCtx, ValType};
 
     #[test]
     fn integration_1() {
-        let mut ctx = Ctx::default();
+        let mut ctx = ValCtx::default();
         let res = Expr::parse(
             r#"{
                 let x = 5;
@@ -17,6 +17,8 @@ mod tests {
             }"#,
         )
         .unwrap()
+        .to_typed(&mut ctx.clone().into())
+        .unwrap()
         .eval(&mut ctx)
         .unwrap();
         assert_eq!(res, 5.into())
@@ -24,13 +26,15 @@ mod tests {
 
     #[test]
     fn integration_2() {
-        let mut ctx = Ctx::default();
+        let mut ctx = ValCtx::default();
         let res = Expr::parse(
             r#"{
-                let foo = func(a) a;
+                let foo = func(a uint) a;
                 (foo(5), foo(a=4))
             }"#,
         )
+        .unwrap()
+        .to_typed(&mut ctx.clone().into())
         .unwrap()
         .eval(&mut ctx)
         .unwrap();
@@ -39,10 +43,20 @@ mod tests {
 
     #[test]
     fn integration_3() {
-        let mut ctx = Ctx::default();
+        let mut ctx = ValCtx::default();
         let add = extern_func!((a: usize, b: usize) => a + b);
-        ctx.register_func("add", &add);
+        ctx.register_func(
+            "add",
+            Pattern::Tuple(vec![
+                Pattern::Single("a", ValType::Uint),
+                Pattern::Single("b", ValType::Uint),
+            ]),
+            ValType::Uint,
+            &add,
+        );
         let res = Expr::parse(r#"(add(4, 5), add(a=4, b=3))"#)
+            .unwrap()
+            .to_typed(&mut ctx.clone().into())
             .unwrap()
             .eval(&mut ctx)
             .unwrap();
@@ -51,24 +65,42 @@ mod tests {
 
     #[test]
     fn integration_4() {
-        let mut ctx = Ctx::default();
+        let mut ctx = ValCtx::default();
         let add = extern_func!((a: usize, b: usize) => a + b);
         let sub = extern_func!((a: usize, b: usize) => a - b);
-        ctx.register_func("+", &add);
-        ctx.register_func("-", &sub);
+        ctx.register_func(
+            "+",
+            Pattern::Tuple(vec![
+                Pattern::Single("a", ValType::Uint),
+                Pattern::Single("b", ValType::Uint),
+            ]),
+            ValType::Uint,
+            &add,
+        );
+        ctx.register_func(
+            "-",
+            Pattern::Tuple(vec![
+                Pattern::Single("a", ValType::Uint),
+                Pattern::Single("b", ValType::Uint),
+            ]),
+            ValType::Uint,
+            &sub,
+        );
         let res = Expr::parse(
             r#"{
-                let double = func(a) a + a;
-                let triple1 = func(a) double(a) + a;
+                let double = func(a uint) a + a;
+                let triple1 = func(a uint) double(a) + a;
                 (triple1(9), {
-                    let triple2 = func(a) a + (a + a);
+                    let triple2 = func(a uint) a + (a + a);
                     triple2(3)
                 }, {
-                    let triple3 = func(a) (double(a) + double(a)) - a;
+                    let triple3 = func(a uint) (double(a) + double(a)) - a;
                     triple3(4)
                 })
             }"#,
         )
+        .unwrap()
+        .to_typed(&mut ctx.clone().into())
         .unwrap()
         .eval(&mut ctx)
         .unwrap();
@@ -77,14 +109,16 @@ mod tests {
 
     #[test]
     fn integration_5() {
-        let mut ctx = Ctx::default();
+        let mut ctx = ValCtx::default();
         let res = Expr::parse(
             r#"{
-                let Employee = func(hours, salary) (hours=hours, salary=salary);
+                let Employee = func(hours uint, salary uint) (hours=hours, salary=salary);
                 let utkan = Employee(hours=1000, salary=0);
                 (utkan.hours, utkan.salary)
             }"#,
         )
+        .unwrap()
+        .to_typed(&mut ctx.clone().into())
         .unwrap()
         .eval(&mut ctx)
         .unwrap();
