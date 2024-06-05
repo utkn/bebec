@@ -97,7 +97,7 @@ impl<'a> Representible<'a> for Tuple<'a> {
 
 impl<'a> Representible<'a> for () {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
-        if val.try_as_primitive()?.is_nil() {
+        if val.try_as_coerced_primitive()?.is_nil() {
             Some(())
         } else {
             None
@@ -111,7 +111,7 @@ impl<'a> Representible<'a> for () {
 
 impl<'a> Representible<'a> for bool {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
-        val.try_as_primitive()?.try_as_bool()
+        val.try_as_coerced_primitive()?.try_as_bool()
     }
 
     fn to_val(self) -> Val<'a> {
@@ -121,7 +121,7 @@ impl<'a> Representible<'a> for bool {
 
 impl<'a> Representible<'a> for usize {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
-        val.try_as_primitive()?.try_as_uint()
+        val.try_as_coerced_primitive()?.try_as_uint()
     }
 
     fn to_val(self) -> Val<'a> {
@@ -131,7 +131,7 @@ impl<'a> Representible<'a> for usize {
 
 impl<'a> Representible<'a> for char {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
-        val.try_as_primitive()?.try_as_char()
+        val.try_as_coerced_primitive()?.try_as_char()
     }
 
     fn to_val(self) -> Val<'a> {
@@ -141,7 +141,7 @@ impl<'a> Representible<'a> for char {
 
 impl<'a> Representible<'a> for String {
     fn try_from_val(val: Val<'a>) -> Option<Self> {
-        val.try_as_primitive()?.try_as_string()
+        val.try_as_coerced_primitive()?.try_as_string()
     }
 
     fn to_val(self) -> Val<'a> {

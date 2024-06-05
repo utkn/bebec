@@ -82,8 +82,8 @@ pub enum DestructError {
     UnsatisfiedName(String),
     #[error("pattern has different length than the tuple {0} != {1}")]
     DifferentLengths(usize, usize),
-    #[error("unmatched pattern")]
-    UnmatchedPattern,
+    #[error("unmatched pattern (pattern `{0}`, value `{1}`)")]
+    UnmatchedPattern(String, String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,7 +113,10 @@ impl<'a> Pattern<'a> {
                 }
                 Ok(())
             }
-            _ => Err(DestructError::UnmatchedPattern),
+            (pat, val) => Err(DestructError::UnmatchedPattern(
+                format!("{:?}", pat),
+                format!("{:?}", val),
+            )),
         }
     }
 }
@@ -190,6 +193,15 @@ pub enum Val<'a> {
 }
 
 impl<'a> Val<'a> {
+    pub fn try_as_coerced_primitive(self) -> Option<Primitive> {
+        match self {
+            Val::Primitive(p) => Some(p),
+            Val::Tuple(Tuple::Ordered(OrderedTuple(mut t))) if t.len() == 1 => {
+                t.remove(0).try_as_coerced_primitive()
+            }
+            _ => None,
+        }
+    }
     /// If the value is an ordered tuple, tries to convert it to `T`. However, if the value is a named tuple, first converts it into an ordered tuple with `ordered_names` before converting to `T`.
     /// Returns `None` if `self` is not a tuple, or the conversion from tuples fail.
     pub fn try_destruct_tuple<T>(
@@ -347,7 +359,7 @@ impl<'a> Expr<'a> {
             } => {
                 if cond
                     .eval(ctx)?
-                    .try_as_primitive()
+                    .try_as_coerced_primitive()
                     .and_then(|p| p.try_as_bool())
                     .ok_or(EvalError::NotAConditional)?
                 {

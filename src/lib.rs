@@ -4,8 +4,6 @@ mod types;
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use crate::core::{extern_func, Ctx, Expr, ExternCallError, Val};
 
     #[test]
@@ -15,7 +13,7 @@ mod tests {
             r#"{
                 let x = 5;
                 let y = true;
-                if y { x } else { 6 }
+                if (y) { x } else { 6 }
             }"#,
         )
         .unwrap()
@@ -60,13 +58,13 @@ mod tests {
         ctx.register_func("-", &sub);
         let res = Expr::parse(
             r#"{
-                let double = func(a) (a + a);
-                let triple1 = func(a) (double(a) + a); 
+                let double = func(a) a + a;
+                let triple1 = func(a) double(a) + a;
                 (triple1(9), {
-                    let triple2 = func(a) (a + (a + a));
+                    let triple2 = func(a) a + (a + a);
                     triple2(3)
                 }, {
-                    let triple3 = func(a) ((double(a) + double(a)) - a);
+                    let triple3 = func(a) (double(a) + double(a)) - a;
                     triple3(4)
                 })
             }"#,
@@ -84,7 +82,7 @@ mod tests {
             r#"{
                 let Employee = func(hours, salary) (hours=hours, salary=salary);
                 let utkan = Employee(hours=1000, salary=0);
-                ((utkan.hours), (utkan.salary))
+                (utkan.hours, utkan.salary)
             }"#,
         )
         .unwrap()
