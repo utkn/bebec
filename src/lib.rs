@@ -98,23 +98,23 @@ mod tests {
         assert_eq!(res, (27, 9, 12).into())
     }
 
-    // #[test]
-    // fn integration_5() {
-    //     let mut ctx = ValCtx::default();
-    //     let res = Expr::parse(
-    //         r#"{
-    //             let Employee = func(hours uint, salary uint) (hours=hours, salary=salary);
-    //             let utkan = Employee(hours=1000, salary=0);
-    //             (utkan.hours, utkan.salary)
-    //         }"#,
-    //     )
-    //     .unwrap()
-    //     .to_typed(&mut ctx.clone().into())
-    //     .unwrap()
-    //     .eval(&mut ctx)
-    //     .unwrap();
-    //     assert_eq!(res, (1000, 0).into())
-    // }
+    #[test]
+    fn integration_named_tuple() {
+        let mut ctx = ValCtx::default();
+        let res = Expr::parse(
+            r#"{
+                let Employee: func(hours: uint, salary: uint) (hours: uint, salary: uint) = func(hours: uint, salary: uint) (hours=hours, salary=salary);
+                let utkan: (hours: uint, salary: uint) = Employee(hours=1000, salary=0);
+                (utkan.hours, utkan.salary)
+            }"#,
+        )
+        .unwrap()
+        .to_typed(&mut ctx.clone().into())
+        .unwrap()
+        .eval(&mut ctx)
+        .unwrap();
+        assert_eq!(res, (1000, 0).into())
+    }
 
     #[test]
     fn integration_coercion() {

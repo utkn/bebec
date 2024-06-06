@@ -85,30 +85,6 @@ pub enum TypeError {
     DestructError(#[from] DestructError),
 }
 
-impl<'a> ValType<'a> {
-    /// For type-checking purposes, this function allows converting from a type to a temporary value whose actual value do not matter.
-    fn to_temp_val(&self) -> Val<'a> {
-        match self {
-            ValType::Uint => Val::Primitive(Primitive::Uint(0)),
-            ValType::Char => Val::Primitive(Primitive::Char('.')),
-            ValType::Bool => Val::Primitive(Primitive::Bool(false)),
-            ValType::String => Val::Primitive(Primitive::String(String::new())),
-            ValType::OrderedTuple(tpl) => {
-                Val::OrderedTuple(tpl.iter().map(ValType::to_temp_val).collect())
-            }
-            ValType::NamedTuple(tpl) => {
-                Val::NamedTuple(tpl.iter().map(|(k, v)| (*k, v.to_temp_val())).collect())
-            }
-            ValType::Func(arg_type, ret_type) => Val::Func(Func::Intern(InternFunc {
-                ret_type: *ret_type.clone(),
-                arg_pattern: Pattern::from_type(&arg_type),
-                captured_ctx: Default::default(),
-                body: Expr::Ref(Typed(*ret_type.clone()), "@"),
-            })),
-        }
-    }
-}
-
 impl<'a> Expr<'a, Untyped> {
     /// Performs type checking and turns the expression into an evaluatable state.
     pub fn to_typed(self, ctx: &mut TypeCtx<'a>) -> Result<Expr<'a, Typed<'a>>, TypeError> {
@@ -149,8 +125,10 @@ impl<'a> Expr<'a, Untyped> {
                 arg_pattern,
                 body,
             } => {
+                let mut tmp_ctx = ValCtx::default();
+                arg_pattern.destruct_val(arg_pattern.to_type().to_uninit(), &mut tmp_ctx)?;
                 let mut ext_ctx = ctx.clone();
-                arg_pattern.destruct_types(&mut ext_ctx);
+                ext_ctx.collect_types(tmp_ctx);
                 let typed_body = body.to_typed(&mut ext_ctx)?;
                 let ret_type = ValType::Func(
                     Box::new(arg_pattern.to_type()),
@@ -187,8 +165,9 @@ impl<'a> Expr<'a, Untyped> {
             } => {
                 let typed_rhs = rhs.to_typed(ctx)?;
                 let rhs_type = typed_rhs.get_type();
-                lhs.destruct_val(rhs_type.to_temp_val(), &mut Default::default())?;
-                lhs.destruct_types(ctx);
+                let mut tmp_ctx = ValCtx::default();
+                lhs.destruct_val(rhs_type.to_uninit(), &mut tmp_ctx)?;
+                ctx.collect_types(tmp_ctx);
                 Ok(Expr::Let {
                     expr_type: Typed(typed_rhs.get_type()),
                     lhs,
@@ -213,7 +192,7 @@ impl<'a> Expr<'a, Untyped> {
                 };
                 let arg_type = typed_arg.get_type();
                 Pattern::from_type(&expected_arg_type)
-                    .destruct_val(arg_type.to_temp_val(), &mut Default::default())?;
+                    .destruct_val(arg_type.to_uninit(), &mut Default::default())?;
                 Ok(Expr::Call {
                     expr_type: Typed(*ret_type),
                     func_name,

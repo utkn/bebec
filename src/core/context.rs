@@ -1,4 +1,4 @@
-use super::{ExternCallable, ExternFunc, Func, InternFunc, Pattern, Val, ValType};
+use super::{ExternCallable, ExternFunc, Func, Pattern, Val, ValType};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ValCtx<'a> {
@@ -40,20 +40,6 @@ impl<'a> ValCtx<'a> {
 impl<'a> From<ValCtx<'a>> for TypeCtx<'a> {
     fn from(val_ctx: ValCtx<'a>) -> Self {
         Self {
-            patterns: val_ctx
-                .bindings
-                .iter()
-                .flat_map(|(k, v)| v.try_as_func_ref().map(|f| (k, f)))
-                .map(|(func_name, func)| {
-                    (
-                        *func_name,
-                        match func {
-                            Func::Intern(InternFunc { arg_pattern, .. })
-                            | Func::Extern(ExternFunc { arg_pattern, .. }) => arg_pattern.clone(),
-                        },
-                    )
-                })
-                .collect(),
             bindings: val_ctx
                 .bindings
                 .into_iter()
@@ -66,7 +52,6 @@ impl<'a> From<ValCtx<'a>> for TypeCtx<'a> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TypeCtx<'a> {
     bindings: Vec<(&'a str, ValType<'a>)>,
-    patterns: Vec<(&'a str, Pattern<'a>)>,
 }
 
 impl<'a> TypeCtx<'a> {
@@ -80,5 +65,10 @@ impl<'a> TypeCtx<'a> {
             .rev()
             .find(|(name, _)| *name == binding_name)
             .map(|(_, v)| v)
+    }
+
+    pub fn collect_types(&mut self, val_ctx: ValCtx<'a>) {
+        self.bindings
+            .extend(val_ctx.bindings.into_iter().map(|(k, v)| (k, v.get_type())))
     }
 }

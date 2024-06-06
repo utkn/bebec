@@ -177,38 +177,19 @@ impl<'a> Func<'a, Typed<'a>> {
     }
 }
 
+/// Represents a value in a program.
 #[derive(Clone, Debug, PartialEq, Eq, strum::EnumTryAs, strum::EnumIs)]
 pub enum Val<'a> {
+    /// An unitiliazed value.
+    Uninit(ValType<'a>),
+    /// A primitive (e.g., char, bool)
     Primitive(Primitive),
+    /// A callable function
     Func(Func<'a, Typed<'a>>),
+    /// An ordered tuple, i.e., a list of `Val`s
     OrderedTuple(OrderedTuple<'a>),
+    /// A named tuple, i.e., an ordered list of name and `Val` pairs
     NamedTuple(NamedTuple<'a>),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, strum::EnumTryAs)]
-pub enum ValType<'a> {
-    Uint,
-    Char,
-    Bool,
-    String,
-    OrderedTuple(Vec<ValType<'a>>),
-    NamedTuple(Vec<(&'a str, ValType<'a>)>),
-    Func(Box<ValType<'a>>, Box<ValType<'a>>),
-}
-
-impl<'a> ValType<'a> {
-    /// Returns the type of an empty ordered tuple.
-    pub fn nil() -> Self {
-        ValType::OrderedTuple(vec![])
-    }
-
-    pub fn unwrap_singular_tuple(&self) -> &Self {
-        match self {
-            // Coerce a tuple with a single element into the inner value
-            ValType::OrderedTuple(t) if t.len() == 1 => t.get(0).unwrap(),
-            _ => self,
-        }
-    }
 }
 
 impl<'a> Val<'a> {
@@ -220,6 +201,7 @@ impl<'a> Val<'a> {
     /// Returns true iff this value is of type `nil`.
     pub fn is_nil(&self) -> bool {
         match self {
+            Val::Uninit(ValType::OrderedTuple(types)) if types.is_empty() => true,
             Val::OrderedTuple(OrderedTuple(vals)) if vals.is_empty() => true,
             _ => false,
         }
@@ -228,6 +210,7 @@ impl<'a> Val<'a> {
     /// Returns the type of the value.
     pub fn get_type(&self) -> ValType<'a> {
         match self {
+            Val::Uninit(t) => t.clone(),
             Val::Primitive(p) => p.get_type(),
             Val::OrderedTuple(t) => t.get_type(),
             Val::NamedTuple(t) => t.get_type(),
@@ -248,6 +231,8 @@ impl<'a> Val<'a> {
         match self {
             // Coerce a tuple with a single element into the inner value
             Val::OrderedTuple(OrderedTuple(mut t)) if t.len() == 1 => t.remove(0),
+            // If we have an unitialized ordered tuple, do the same, but instantiate the value on the fly to the uninit counterpart.
+            Val::Uninit(ValType::OrderedTuple(mut t)) if t.len() == 1 => t.remove(0).to_uninit(),
             _ => self,
         }
     }
@@ -271,5 +256,37 @@ impl<'a> Val<'a> {
             return None;
         };
         T::try_from_val(Val::OrderedTuple(ordered))
+    }
+}
+
+/// Represents the type of a value.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, strum::EnumTryAs)]
+pub enum ValType<'a> {
+    Uint,
+    Char,
+    Bool,
+    String,
+    OrderedTuple(Vec<ValType<'a>>),
+    NamedTuple(Vec<(&'a str, ValType<'a>)>),
+    Func(Box<ValType<'a>>, Box<ValType<'a>>),
+}
+
+impl<'a> ValType<'a> {
+    /// Returns an uninitialized value of this type.
+    pub fn to_uninit(&self) -> Val<'a> {
+        Val::Uninit(self.clone())
+    }
+
+    /// Returns the type of an empty ordered tuple.
+    pub fn nil() -> Self {
+        ValType::OrderedTuple(vec![])
+    }
+
+    pub fn unwrap_singular_tuple(&self) -> &Self {
+        match self {
+            // Coerce a tuple with a single element into the inner value
+            ValType::OrderedTuple(t) if t.len() == 1 => t.get(0).unwrap(),
+            _ => self,
+        }
     }
 }

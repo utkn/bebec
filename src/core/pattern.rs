@@ -1,4 +1,4 @@
-use super::{context::TypeCtx, CoercionError, NamedTuple, OrderedTuple, Val, ValCtx, ValType};
+use super::{try_coerce, CoercionError, OrderedTuple, Val, ValCtx, ValType};
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum DestructError {
@@ -43,16 +43,6 @@ impl<'a> Pattern<'a> {
         }
     }
 
-    pub fn destruct_types(&self, type_ctx: &mut TypeCtx<'a>) {
-        match self {
-            Pattern::Single(name, ty) => type_ctx.extend(name, ty.clone()),
-            Pattern::OrderedTuple(pats) => pats.iter().for_each(|p| p.destruct_types(type_ctx)),
-            Pattern::NamedTuple(pats) => pats
-                .iter()
-                .for_each(|(name, ty)| type_ctx.extend(name, ty.clone())),
-        }
-    }
-
     pub fn destruct_val(
         &self,
         val: Val<'a>,
@@ -61,6 +51,20 @@ impl<'a> Pattern<'a> {
         match (self, val) {
             (Pattern::Single(name, ty), val) => {
                 destruct_val_single(name, ty, &val.get_type(), Some((val, val_ctx)))
+            }
+            (_, Val::Uninit(ValType::OrderedTuple(types))) => {
+                // Partially instantiate the uninitialized value to be able to match against the inner values.
+                self.destruct_val(
+                    Val::OrderedTuple(types.iter().map(ValType::to_uninit).collect()),
+                    val_ctx,
+                )
+            }
+            (_, Val::Uninit(ValType::NamedTuple(types))) => {
+                // Partially instantiate the uninitialized value to be able to match against the inner values.
+                self.destruct_val(
+                    Val::NamedTuple(types.iter().map(|(k, v)| (*k, v.to_uninit())).collect()),
+                    val_ctx,
+                )
             }
             (Pattern::OrderedTuple(pats), Val::OrderedTuple(OrderedTuple(vals)))
                 if pats.len() == vals.len() =>
@@ -104,11 +108,11 @@ fn destruct_val_single<'a>(
     to_extend: Option<(Val<'a>, &mut ValCtx<'a>)>,
 ) -> Result<(), DestructError> {
     if let Some((mut val, val_ctx)) = to_extend {
-        val_type.try_coerce(pat_type, Some(&mut val))?;
+        try_coerce(val_type, pat_type, Some(&mut val))?;
         val_ctx.extend(pat_name, val);
         Ok(())
     } else {
-        val_type.try_coerce(pat_type, None)?;
+        try_coerce(val_type, pat_type, None)?;
         Ok(())
     }
 }
