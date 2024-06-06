@@ -1,16 +1,18 @@
+mod coercion;
 mod context;
 mod expression;
 mod extern_func;
+mod pattern;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::types::Representible;
 
+pub use coercion::*;
 pub use context::ValCtx;
 pub use expression::{EvalError, Expr, Typed, Untyped};
 pub(crate) use extern_func::{extern_func, ExternCallError, ExternCallable, ExternFunc};
-
-use self::context::TypeCtx;
+pub use pattern::{DestructError, Pattern};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OrderedTuple<'a>(pub Vec<Val<'a>>);
@@ -34,16 +36,12 @@ impl<'a> FromIterator<Val<'a>> for OrderedTuple<'a> {
 impl<'a> OrderedTuple<'a> {
     /// Returns the type of the ordered tuple.
     pub fn get_type(&self) -> ValType<'a> {
-        if self.0.is_empty() {
-            ValType::Nil
-        } else {
-            ValType::OrderedTuple(self.0.iter().map(Val::get_type).collect())
-        }
+        ValType::OrderedTuple(self.0.iter().map(Val::get_type).collect())
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NamedTuple<'a>(pub HashMap<&'a str, Val<'a>>);
+pub struct NamedTuple<'a>(pub Vec<(&'a str, Val<'a>)>);
 
 impl<'a> FromIterator<(&'a str, Val<'a>)> for NamedTuple<'a> {
     fn from_iter<T: IntoIterator<Item = (&'a str, Val<'a>)>>(iter: T) -> Self {
@@ -54,7 +52,7 @@ impl<'a> FromIterator<(&'a str, Val<'a>)> for NamedTuple<'a> {
 impl<'a> IntoIterator for NamedTuple<'a> {
     type Item = (&'a str, Val<'a>);
 
-    type IntoIter = <HashMap<&'a str, Val<'a>> as IntoIterator>::IntoIter;
+    type IntoIter = <Vec<(&'a str, Val<'a>)> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -62,6 +60,21 @@ impl<'a> IntoIterator for NamedTuple<'a> {
 }
 
 impl<'a> NamedTuple<'a> {
+    pub fn iter(&self) -> impl Iterator<Item = &(&'a str, Val<'a>)> {
+        self.0.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut (&'a str, Val<'a>)> {
+        self.0.iter_mut()
+    }
+
+    pub fn remove<'b>(&mut self, name: &'b str) -> Option<Val<'a>> {
+        if let Some(idx) = self.0.iter().position(|(k, _)| k == &name) {
+            Some(self.0.remove(idx).1)
+        } else {
+            None
+        }
+    }
     /// Returns the type of the named tuple.
     pub fn get_type(&self) -> ValType<'a> {
         ValType::NamedTuple(self.0.iter().map(|(k, v)| (*k, v.get_type())).collect())
@@ -73,143 +86,20 @@ impl<'a> NamedTuple<'a> {
     ) -> Option<OrderedTuple<'a>> {
         let mut vals = Vec::new();
         for name in ordered_names {
-            vals.push(self.0.remove(name)?);
+            vals.push(self.remove(name)?);
         }
         Some(vals.into_iter().collect())
     }
 
     pub fn get(&self, field_name: &str) -> Option<&Val<'a>> {
-        self.0.get(field_name)
+        self.0
+            .iter()
+            .find(|(k, _)| k == &field_name)
+            .map(|(_, v)| v)
     }
-}
 
-#[derive(Clone, Debug, PartialEq, Eq, strum::EnumTryAs)]
-pub enum Tuple<'a> {
-    Named(NamedTuple<'a>),
-    Ordered(OrderedTuple<'a>),
-}
-
-impl<'a> Tuple<'a> {
     pub fn len(&self) -> usize {
-        match self {
-            Tuple::Named(tpl) => tpl.0.len(),
-            Tuple::Ordered(tpl) => tpl.0.len(),
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum DestructError {
-    #[error("tuple does not contain the name `{0}`")]
-    UnsatisfiedName(String),
-    #[error("unmatched pattern (pattern `{0}`, value `{1}`)")]
-    UnmatchedPattern(String, String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Pattern<'a> {
-    Single(&'a str, ValType<'a>),
-    Tuple(Vec<Pattern<'a>>),
-}
-
-impl<'a> Pattern<'a> {
-    pub fn can_destruct(&self, val_type: &ValType<'a>) -> bool {
-        match (self, val_type) {
-            (Pattern::Single(name, _), ValType::NamedTuple(pairs)) => {
-                if let Some(tpl_val_type) = pairs.get(name) {
-                    self.can_destruct(tpl_val_type)
-                } else {
-                    false
-                }
-            }
-            (Pattern::Single(_, t), val_type) => {
-                let unwrapped_type = if val_type != t {
-                    val_type.unwrap_singular_tuple()
-                } else {
-                    val_type
-                };
-                if unwrapped_type == t {
-                    true
-                } else {
-                    false
-                }
-            }
-            (Pattern::Tuple(pats), ValType::OrderedTuple(vals)) if pats.len() == vals.len() => {
-                for (pat, val) in pats.iter().zip(vals.into_iter()) {
-                    if !pat.can_destruct(val) {
-                        return false;
-                    }
-                }
-                true
-            }
-            (Pattern::Tuple(pats), ValType::NamedTuple(pairs)) if pats.len() == pairs.len() => {
-                for pat in pats {
-                    if !pat.can_destruct(val_type) {
-                        return false;
-                    }
-                }
-                true
-            }
-            _ => false,
-        }
-    }
-
-    pub fn destruct_types(&self, type_ctx: &mut TypeCtx<'a>) {
-        match self {
-            Pattern::Single(name, t) => type_ctx.extend(name, t.clone()),
-            Pattern::Tuple(pats) => pats.iter().for_each(|p| p.destruct_types(type_ctx)),
-        }
-    }
-
-    pub fn destruct_vals(
-        &self,
-        val: Val<'a>,
-        val_ctx: &mut ValCtx<'a>,
-    ) -> Result<(), DestructError> {
-        match (self, val) {
-            (Pattern::Single(name, _), Val::NamedTuple(NamedTuple(mut pairs))) => {
-                let tpl_val = pairs
-                    .remove(name)
-                    .ok_or(DestructError::UnsatisfiedName(name.to_string()))?;
-                self.destruct_vals(tpl_val, val_ctx)
-            }
-            (Pattern::Single(name, t), val) => {
-                let unwrapped_val = if val.get_type() != *t {
-                    val.unwrap_singular_tuple()
-                } else {
-                    val
-                };
-                if unwrapped_val.get_type() == *t {
-                    val_ctx.extend(name, unwrapped_val);
-                    Ok(())
-                } else {
-                    return Err(DestructError::UnmatchedPattern(
-                        format!("{:?}", self),
-                        format!("{:?}", unwrapped_val),
-                    ));
-                }
-            }
-            (Pattern::Tuple(pats), Val::OrderedTuple(OrderedTuple(vals)))
-                if pats.len() == vals.len() =>
-            {
-                for (pat, val) in pats.iter().zip(vals.into_iter()) {
-                    pat.destruct_vals(val, val_ctx)?;
-                }
-                Ok(())
-            }
-            (Pattern::Tuple(pats), Val::NamedTuple(NamedTuple(pairs)))
-                if pats.len() == pairs.len() =>
-            {
-                for pat in pats {
-                    pat.destruct_vals(Val::NamedTuple(NamedTuple(pairs.clone())), val_ctx)?;
-                }
-                Ok(())
-            }
-            (pat, val) => Err(DestructError::UnmatchedPattern(
-                format!("{:?}", pat),
-                format!("{:?}", val),
-            )),
-        }
+        self.0.len()
     }
 }
 
@@ -260,6 +150,12 @@ pub enum Func<'a, T> {
 }
 
 impl<'a> Func<'a, Typed<'a>> {
+    pub fn arg_pattern(&self) -> &Pattern<'a> {
+        match self {
+            Func::Intern(InternFunc { arg_pattern, .. })
+            | Func::Extern(ExternFunc { arg_pattern, .. }) => arg_pattern,
+        }
+    }
     pub fn call(&self, arg: Val<'a>) -> Result<Val<'a>, CallError> {
         match self {
             Func::Intern(InternFunc {
@@ -270,7 +166,7 @@ impl<'a> Func<'a, Typed<'a>> {
             }) => {
                 let mut func_ctx = captured_ctx.clone();
                 arg_pattern
-                    .destruct_vals(arg, &mut func_ctx)
+                    .destruct_val(arg, &mut func_ctx)
                     .map_err(CallError::from)?;
                 body.clone()
                     .eval(&mut func_ctx)
@@ -289,23 +185,27 @@ pub enum Val<'a> {
     NamedTuple(NamedTuple<'a>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, strum::EnumTryAs)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, strum::EnumTryAs)]
 pub enum ValType<'a> {
-    Nil,
     Uint,
     Char,
     Bool,
     String,
     OrderedTuple(Vec<ValType<'a>>),
-    NamedTuple(HashMap<&'a str, ValType<'a>>),
-    Func(Box<ValType<'a>>),
+    NamedTuple(Vec<(&'a str, ValType<'a>)>),
+    Func(Box<ValType<'a>>, Box<ValType<'a>>),
 }
 
 impl<'a> ValType<'a> {
+    /// Returns the type of an empty ordered tuple.
+    pub fn nil() -> Self {
+        ValType::OrderedTuple(vec![])
+    }
+
     pub fn unwrap_singular_tuple(&self) -> &Self {
         match self {
             // Coerce a tuple with a single element into the inner value
-            ValType::OrderedTuple(t) if t.len() == 1 => t.get(0).unwrap().unwrap_singular_tuple(),
+            ValType::OrderedTuple(t) if t.len() == 1 => t.get(0).unwrap(),
             _ => self,
         }
     }
@@ -331,19 +231,23 @@ impl<'a> Val<'a> {
             Val::Primitive(p) => p.get_type(),
             Val::OrderedTuple(t) => t.get_type(),
             Val::NamedTuple(t) => t.get_type(),
-            Val::Func(Func::Intern(InternFunc { ret_type, .. }))
-            | Val::Func(Func::Extern(ExternFunc { ret_type, .. })) => {
-                ValType::Func(Box::new(ret_type.clone()))
-            }
+            Val::Func(Func::Intern(InternFunc {
+                arg_pattern,
+                ret_type,
+                ..
+            }))
+            | Val::Func(Func::Extern(ExternFunc {
+                arg_pattern,
+                ret_type,
+                ..
+            })) => ValType::Func(Box::new(arg_pattern.to_type()), Box::new(ret_type.clone())),
         }
     }
 
     pub fn unwrap_singular_tuple(self) -> Self {
         match self {
             // Coerce a tuple with a single element into the inner value
-            Val::OrderedTuple(OrderedTuple(mut t)) if t.len() == 1 => {
-                t.remove(0).unwrap_singular_tuple()
-            }
+            Val::OrderedTuple(OrderedTuple(mut t)) if t.len() == 1 => t.remove(0),
             _ => self,
         }
     }

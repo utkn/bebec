@@ -98,6 +98,15 @@ impl<'a> PrattParser<'a> {
         }
     }
 
+    fn check_next_pair(
+        &self,
+        pred_1: impl FnOnce(Token<'a>) -> bool,
+        pred_2: impl FnOnce(Token<'a>) -> bool,
+    ) -> bool {
+        let mut test = self.clone();
+        test.try_consume(pred_1).is_some() && test.try_consume(pred_2).is_some()
+    }
+
     fn parse_type(&mut self) -> Option<ValType<'a>> {
         match self.lexer.peek() {
             Some(Token::Word("bool")) => {
@@ -116,35 +125,74 @@ impl<'a> PrattParser<'a> {
                 self.lexer.next().unwrap();
                 Some(ValType::String)
             }
+            Some(Token::Word("func")) => {
+                self.lexer.next().unwrap();
+                let arg_type = self.parse_type()?;
+                let ret_type = self.parse_type()?;
+                Some(ValType::Func(Box::new(arg_type), Box::new(ret_type)))
+            }
+            Some(Token::Symbol("(")) => {
+                self.lexer.next().unwrap();
+                let is_named = self
+                    .check_next_pair(|t| matches!(t, Token::Word(_)), |t| t == Token::Symbol(":"));
+                let ty = if is_named {
+                    // named tuple type
+                    let mut inner_types = Vec::new();
+                    loop {
+                        let Some(Token::Word(key)) =
+                            self.try_consume(|t| matches!(t, Token::Word(_)))
+                        else {
+                            break;
+                        };
+                        self.try_consume(|t| t == Token::Symbol(":"))?;
+                        let key_type = self.parse_type()?;
+                        inner_types.push((key, key_type));
+                        if self.try_consume(|t| t == Token::Symbol(",")).is_none() {
+                            break;
+                        }
+                    }
+                    ValType::NamedTuple(inner_types)
+                } else {
+                    // ordered tuple type
+                    let mut inner_types = Vec::new();
+                    while let Some(ty) = self.parse_type() {
+                        inner_types.push(ty);
+                        if self.try_consume(|t| t == Token::Symbol(",")).is_none() {
+                            break;
+                        }
+                    }
+                    ValType::OrderedTuple(inner_types)
+                };
+                self.try_consume(|t| t == Token::Symbol(")"))?;
+                Some(ty)
+            }
             _ => None,
         }
     }
 
     fn parse_pattern(&mut self) -> Option<Pattern<'a>> {
-        // TODO make it recursive !!!!
-        self.try_consume(|t| t == Token::Symbol("("))?;
-        let mut single_pats = Vec::new();
-        while let Some(t) = self.try_consume(|t| matches!(t, Token::Word(_))) {
-            let pat_name = t.contents();
-            let pat_type = self.parse_type()?;
-            single_pats.push(Pattern::Single(pat_name, pat_type));
-            if self.try_consume(|t| t == Token::Symbol(",")).is_none() {
-                break;
+        match self.lexer.peek() {
+            Some(Token::Symbol("(")) => {
+                let tuple_type = self.parse_type()?;
+                Some(Pattern::from_type(&tuple_type))
             }
+            Some(Token::Word(_)) => {
+                let t = self.try_consume(|t| matches!(t, Token::Word(_))).unwrap();
+                let pat_name = t.contents();
+                self.try_consume(|t| t == Token::Symbol(":"))?;
+                let pat_type = self.parse_type()?;
+                Some(Pattern::Single(pat_name, pat_type))
+            }
+            _ => None,
         }
-        self.try_consume(|t| t == Token::Symbol(")"))?;
-        Some(Pattern::Tuple(single_pats))
     }
 
     fn parse_new_tuple_expr(&mut self) -> Option<Expr<'a, Untyped>> {
         self.try_consume(|t| t == Token::Symbol("("))?;
-        let is_named = {
-            let mut test = self.clone();
-            test.try_consume(|t| matches!(t, Token::Word(_))).is_some()
-                && test.try_consume(|t| t == Token::Symbol("=")).is_some()
-        };
+        let is_named =
+            self.check_next_pair(|t| matches!(t, Token::Word(_)), |t| t == Token::Symbol("="));
         if is_named {
-            let mut exprs = HashMap::new();
+            let mut expr_pairs = Vec::new();
             loop {
                 let Some(Token::Word(key)) = self.try_consume(|t| matches!(t, Token::Word(_)))
                 else {
@@ -152,13 +200,13 @@ impl<'a> PrattParser<'a> {
                 };
                 self.try_consume(|t| t == Token::Symbol("="))?;
                 let rhs = self.parse_expr(0)?;
-                exprs.insert(key, rhs);
+                expr_pairs.push((key, rhs));
                 if self.try_consume(|t| t == Token::Symbol(",")).is_none() {
                     break;
                 }
             }
             self.try_consume(|t| t == Token::Symbol(")"))?;
-            Some(Expr::NewNamedTuple(Untyped, exprs))
+            Some(Expr::NewNamedTuple(Untyped, expr_pairs))
         } else {
             let mut exprs = Vec::new();
             while let Some(expr) = self.parse_expr(0) {
@@ -174,14 +222,12 @@ impl<'a> PrattParser<'a> {
 
     fn parse_let_expr(&mut self) -> Option<Expr<'a, Untyped>> {
         self.try_consume(|t| t == Token::Word("let"))?;
-        let binding_name = self
-            .try_consume(|t| matches!(t, Token::Word(_)))?
-            .contents();
+        let lhs = self.parse_pattern()?;
         self.try_consume(|t| t == Token::Symbol("="))?;
         let rhs = self.parse_expr(0)?;
         return Some(Expr::Let {
-            ret_type: Untyped,
-            name: binding_name,
+            expr_type: Untyped,
+            lhs,
             rhs: Box::new(rhs),
         });
     }
@@ -197,7 +243,7 @@ impl<'a> PrattParser<'a> {
             None
         };
         return Some(Expr::If {
-            ret_type: Untyped,
+            expr_type: Untyped,
             cond: Box::new(cond),
             main_branch: Box::new(main_branch),
             else_branch: else_branch.map(|b| Box::new(b)),
@@ -209,7 +255,7 @@ impl<'a> PrattParser<'a> {
         let arg_pattern = self.parse_pattern()?;
         let body = self.parse_expr(0)?;
         return Some(Expr::NewFunc {
-            ret_type: Untyped,
+            expr_type: Untyped,
             arg_pattern,
             body: Box::new(body),
         });
@@ -240,7 +286,7 @@ impl<'a> PrattParser<'a> {
                 }
                 self.try_consume(|t| t == Token::Symbol("}"))?;
                 Expr::Block {
-                    ret_type: Untyped,
+                    expr_type: Untyped,
                     exprs,
                 }
             }
@@ -253,7 +299,7 @@ impl<'a> PrattParser<'a> {
                 let prefix_binding = prefix_binding(s).unwrap();
                 let rhs = self.parse_expr(prefix_binding)?;
                 Expr::Call {
-                    ret_type: Untyped,
+                    expr_type: Untyped,
                     func_name: s,
                     arg: Box::new(rhs),
                 }
@@ -271,12 +317,12 @@ impl<'a> PrattParser<'a> {
                     let rhs = self.parse_expr(r_bp)?;
                     lhs = match rhs {
                         Expr::Ref(_, field_name) if op == "." => Expr::Access {
-                            ret_type: Untyped,
+                            expr_type: Untyped,
                             lhs: Box::new(lhs),
                             field_name,
                         },
                         _ => Expr::Call {
-                            ret_type: Untyped,
+                            expr_type: Untyped,
                             func_name: op,
                             arg: Box::new(Expr::NewOrderedTuple(Untyped, vec![lhs, rhs])),
                         },
@@ -290,7 +336,7 @@ impl<'a> PrattParser<'a> {
                             break;
                         };
                         lhs = Expr::Call {
-                            ret_type: Untyped,
+                            expr_type: Untyped,
                             func_name: r,
                             arg: Box::new(arg),
                         }

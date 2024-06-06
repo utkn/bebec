@@ -74,18 +74,6 @@ impl<'a> TypeCtx<'a> {
         self.bindings.push((binding_name, val_type));
     }
 
-    pub fn extend_pattern(&mut self, pattern_name: &'a str, pattern: Pattern<'a>) {
-        self.patterns.push((pattern_name, pattern));
-    }
-
-    pub fn get_pattern(&self, pattern_name: &'a str) -> Option<&Pattern<'a>> {
-        self.patterns
-            .iter()
-            .rev()
-            .find(|(name, _)| *name == pattern_name)
-            .map(|(_, v)| v)
-    }
-
     pub fn get(&self, binding_name: &'a str) -> Option<&ValType<'a>> {
         self.bindings
             .iter()
