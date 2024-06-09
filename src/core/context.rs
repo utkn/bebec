@@ -9,7 +9,7 @@ impl<'a> ValCtx<'a> {
     pub fn register_func(
         &mut self,
         func_name: &'a str,
-        arg_pattern: Pattern<'a>,
+        params: Vec<(&'a str, ValType<'a>)>,
         ret_type: ValType<'a>,
         body: &'a impl ExternCallable<'a>,
     ) {
@@ -17,7 +17,7 @@ impl<'a> ValCtx<'a> {
             func_name,
             Val::Func(Func::Extern(ExternFunc {
                 ret_type,
-                arg_pattern,
+                arg_type: ValType::NamedTuple(params),
                 func_name,
                 body,
             })),

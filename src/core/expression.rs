@@ -1,25 +1,8 @@
 use super::{
-    context::TypeCtx, CallError, DestructError, Func, InternFunc, NamedTuple, OrderedTuple,
-    Pattern, Primitive, Val, ValCtx, ValType,
+    context::TypeCtx, try_coerce, CallError, CoercionError, CoercionStrategy, DestructError, Func,
+    InternFunc, NamedTuple, OrderedTuple, Pattern, PatternBuildError, Primitive, Val, ValCtx,
+    ValType,
 };
-
-#[derive(Debug, thiserror::Error)]
-pub enum EvalError {
-    #[error("error during call to `{0}`: {1:?}")]
-    CallError(String, CallError),
-    #[error("error while destructuring: {0:?}")]
-    DestructError(#[from] DestructError),
-    #[error("trying to call a value that is not a function `{0}`")]
-    NotAFunction(String),
-    #[error("invalid reference `{0}`")]
-    InvalidReference(String),
-    #[error("expected a conditional in the if expression")]
-    NotAConditional,
-    #[error("invalid field `{0}`")]
-    InvalidField(String),
-    #[error("trying to access the field of a value that is not a named tuple")]
-    NotANamedTuple,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Untyped;
@@ -31,58 +14,63 @@ pub struct Typed<'a>(ValType<'a>);
 pub enum Expr<'a, T> {
     Ref(T, &'a str),
     NewPrimitive(T, Primitive),
-    NewNamedTuple(T, Vec<(&'a str, Expr<'a, T>)>),
-    NewOrderedTuple(T, Vec<Expr<'a, T>>),
+    NewNamedTuple(T, Vec<(&'a str, Self)>),
+    NewOrderedTuple(T, Vec<Self>),
     NewFunc {
         expr_type: T,
-        arg_pattern: Pattern<'a>,
-        body: Box<Expr<'a, T>>,
+        params: Vec<(&'a str, ValType<'a>)>,
+        body: Box<Self>,
     },
     Block {
         expr_type: T,
-        exprs: Vec<Expr<'a, T>>,
+        exprs: Vec<Self>,
     },
     Call {
         expr_type: T,
         func_name: &'a str,
-        arg: Box<Expr<'a, T>>,
+        arg: Box<Self>,
     },
     Let {
         expr_type: T,
         lhs: Pattern<'a>,
-        rhs: Box<Expr<'a, T>>,
+        rhs: Box<Self>,
     },
     If {
         expr_type: T,
-        cond: Box<Expr<'a, T>>,
-        main_branch: Box<Expr<'a, T>>,
-        else_branch: Option<Box<Expr<'a, T>>>,
+        cond: Box<Self>,
+        main_branch: Box<Self>,
+        else_branch: Option<Box<Self>>,
     },
     Access {
         expr_type: T,
-        lhs: Box<Expr<'a, T>>,
+        lhs: Box<Self>,
         field_name: &'a str,
     },
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum TypeError {
-    #[error("expected type {expected}, got {actual}")]
-    InvalidType { expected: String, actual: String },
     #[error("invalid reference `{0}`")]
     InvalidRef(String),
     #[error("expected `{0}` to be a function, but it has a type {1}")]
     NotAFunction(String, String),
-    #[error("if branches do not return the same value")]
-    InconsistentIfBranches,
-    #[error("if condition is not a boolean but has type {0}")]
-    NotAConditional(String),
+    #[error("if branches must return the same value, but the main branch returns {main_type}, whereas the else branch returns {else_type}")]
+    InconsistentIfBranches {
+        main_type: String,
+        else_type: String,
+    },
+    #[error("if condition cannot be coerced to a boolean, {0:?}")]
+    NotAConditional(CoercionError),
     #[error("invalid field `{0}` on a named tuple of type {1}")]
     InvalidField(String, String),
     #[error("trying to access the field of a value that is not a named tuple")]
     NotANamedTuple,
-    #[error("destruct error on call or let {0:?}")]
-    DestructError(#[from] DestructError),
+    #[error("arguments do not match on call to `{0}`: {1:?}")]
+    ArgCoercionError(String, CoercionError),
+    #[error("destruct error on let: {0:?}")]
+    DestructLetError(DestructError),
+    #[error("argument pattern cannot be trivially destructed: {0:?}")]
+    MalformedArgPattern(DestructError),
 }
 
 impl<'a> Expr<'a, Untyped> {
@@ -93,13 +81,13 @@ impl<'a> Expr<'a, Untyped> {
                 Typed(ctx.get(s).cloned().ok_or(TypeError::InvalidRef(s.into()))?),
                 s,
             )),
-            Expr::NewPrimitive(_, p) => Ok(Expr::NewPrimitive(Typed(p.get_type()), p)),
+            Expr::NewPrimitive(_, p) => Ok(Expr::NewPrimitive(Typed(p.get_primitive_type()), p)),
             Expr::NewNamedTuple(_, tpl) => {
                 let mut named_tpl_type = Vec::new();
                 let mut typed_tpl = Vec::new();
                 for (k, v) in tpl {
                     let typed_v = v.to_typed(ctx)?;
-                    named_tpl_type.push((k, typed_v.get_type()));
+                    named_tpl_type.push((k, typed_v.get_expr_type()));
                     typed_tpl.push((k, typed_v));
                 }
                 Ok(Expr::NewNamedTuple(
@@ -112,7 +100,7 @@ impl<'a> Expr<'a, Untyped> {
                 let mut typed_tpl = Vec::new();
                 for v in tpl {
                     let typed_v = v.to_typed(ctx)?;
-                    ordered_tpl_type.push(typed_v.get_type());
+                    ordered_tpl_type.push(typed_v.get_expr_type());
                     typed_tpl.push(typed_v);
                 }
                 Ok(Expr::NewOrderedTuple(
@@ -122,21 +110,21 @@ impl<'a> Expr<'a, Untyped> {
             }
             Expr::NewFunc {
                 expr_type: _,
-                arg_pattern,
+                params,
                 body,
             } => {
-                let mut tmp_ctx = ValCtx::default();
-                arg_pattern.destruct_val(arg_pattern.to_type().to_uninit(), &mut tmp_ctx)?;
                 let mut ext_ctx = ctx.clone();
-                ext_ctx.collect_types(tmp_ctx);
+                for (name, ty) in params.clone() {
+                    ext_ctx.extend(name, ty);
+                }
                 let typed_body = body.to_typed(&mut ext_ctx)?;
-                let ret_type = ValType::Func(
-                    Box::new(arg_pattern.to_type()),
-                    Box::new(typed_body.get_type()),
+                let expr_type = ValType::Func(
+                    Box::new(ValType::NamedTuple(params.clone())),
+                    Box::new(typed_body.get_expr_type()),
                 );
                 Ok(Expr::NewFunc {
-                    expr_type: Typed(ret_type),
-                    arg_pattern,
+                    expr_type: Typed(expr_type),
+                    params,
                     body: Box::new(typed_body),
                 })
             }
@@ -151,7 +139,7 @@ impl<'a> Expr<'a, Untyped> {
                 }
                 let ret_type = typed_exprs
                     .last()
-                    .map(|expr| expr.get_type())
+                    .map(Expr::get_expr_type)
                     .unwrap_or(ValType::nil());
                 Ok(Expr::Block {
                     expr_type: Typed(ret_type),
@@ -164,12 +152,17 @@ impl<'a> Expr<'a, Untyped> {
                 rhs,
             } => {
                 let typed_rhs = rhs.to_typed(ctx)?;
-                let rhs_type = typed_rhs.get_type();
+                let rhs_type = typed_rhs.get_expr_type();
                 let mut tmp_ctx = ValCtx::default();
-                lhs.destruct_val(rhs_type.to_uninit(), &mut tmp_ctx)?;
+                lhs.destruct_val(
+                    rhs_type.to_uninit(),
+                    &mut tmp_ctx,
+                    CoercionStrategy::let_pattern(),
+                )
+                .map_err(|err| TypeError::DestructLetError(err))?;
                 ctx.collect_types(tmp_ctx);
                 Ok(Expr::Let {
-                    expr_type: Typed(typed_rhs.get_type()),
+                    expr_type: Typed(typed_rhs.get_expr_type()),
                     lhs,
                     rhs: Box::new(typed_rhs),
                 })
@@ -190,9 +183,14 @@ impl<'a> Expr<'a, Untyped> {
                     }
                     None => return Err(TypeError::InvalidRef(func_name.into())),
                 };
-                let arg_type = typed_arg.get_type();
-                Pattern::from_type(&expected_arg_type)
-                    .destruct_val(arg_type.to_uninit(), &mut Default::default())?;
+                let arg_type = typed_arg.get_expr_type();
+                try_coerce(
+                    &arg_type,
+                    &expected_arg_type,
+                    None,
+                    CoercionStrategy::arg_pattern(),
+                )
+                .map_err(|err| TypeError::ArgCoercionError(func_name.into(), err))?;
                 Ok(Expr::Call {
                     expr_type: Typed(*ret_type),
                     func_name,
@@ -206,25 +204,25 @@ impl<'a> Expr<'a, Untyped> {
                 else_branch,
             } => {
                 let typed_cond = cond.to_typed(ctx)?;
-                let cond_type = typed_cond.get_type();
-                if cond_type != ValType::Bool
-                    && cond_type != ValType::OrderedTuple(vec![ValType::Bool])
-                {
-                    return Err(TypeError::NotAConditional(format!("{:?}", cond_type)));
-                }
+                let cond_type = typed_cond.get_expr_type();
+                try_coerce(&cond_type, &ValType::Bool, None, CoercionStrategy::UNWRAP)
+                    .map_err(|err| TypeError::NotAConditional(err))?;
                 let typed_main_branch = main_branch.to_typed(ctx)?;
                 let typed_else_branch = if let Some(else_branch) = else_branch {
                     Some(else_branch.to_typed(ctx)?)
                 } else {
                     None
                 };
-                let main_type = typed_main_branch.get_type();
+                let main_type = typed_main_branch.get_expr_type();
                 let else_type = typed_else_branch
                     .as_ref()
-                    .map(|b| b.get_type())
+                    .map(|b| b.get_expr_type())
                     .unwrap_or(ValType::nil());
                 if main_type != else_type {
-                    return Err(TypeError::InconsistentIfBranches);
+                    return Err(TypeError::InconsistentIfBranches {
+                        main_type: main_type.to_string(),
+                        else_type: else_type.to_string(),
+                    });
                 }
                 Ok(Expr::If {
                     expr_type: Typed(main_type),
@@ -240,7 +238,7 @@ impl<'a> Expr<'a, Untyped> {
             } => {
                 let typed_lhs = lhs.to_typed(ctx)?;
                 let lhs_type = typed_lhs
-                    .get_type()
+                    .get_expr_type()
                     .try_as_named_tuple()
                     .ok_or(TypeError::NotANamedTuple)?;
                 let field_type = lhs_type
@@ -261,8 +259,30 @@ impl<'a> Expr<'a, Untyped> {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum EvalError {
+    #[error("error during call to `{0}`: {1:?}")]
+    CallError(String, CallError),
+    #[error("error while destructuring: {0:?}")]
+    DestructError(#[from] DestructError),
+    #[error("trying to call a value that is not a function `{0}`")]
+    NotAFunction(String),
+    #[error("invalid reference `{0}`")]
+    InvalidReference(String),
+    #[error("expected a conditional in the if expression: {0:?}")]
+    NotAConditional(CoercionError),
+    #[error("invalid field `{0}`")]
+    InvalidField(String),
+    #[error("trying to access the field of a value that is not a named tuple")]
+    NotANamedTuple,
+    #[error("argument {0} cannot be represented as a pattern: {1:?}")]
+    MalformedArg(String, PatternBuildError),
+    #[error("malformed expression: {0}")]
+    MalformedExpr(String),
+}
+
 impl<'a> Expr<'a, Typed<'a>> {
-    pub fn get_type(&self) -> ValType<'a> {
+    pub fn get_expr_type(&self) -> ValType<'a> {
         match self {
             Expr::Ref(Typed(t), _)
             | Expr::NewPrimitive(Typed(t), _)
@@ -297,9 +317,9 @@ impl<'a> Expr<'a, Typed<'a>> {
 
     pub fn eval(self, ctx: &mut ValCtx<'a>) -> Result<Val<'a>, EvalError> {
         match self {
-            Expr::Ref(_, token) => match ctx.get(token) {
+            Expr::Ref(_, s) => match ctx.get(s) {
                 Some(v) => Ok(v.clone()),
-                None => Err(EvalError::InvalidReference(token.into())),
+                None => Err(EvalError::InvalidReference(s.into())),
             },
             Expr::NewPrimitive(_, p) => Ok(Val::Primitive(p)),
             Expr::NewOrderedTuple(_, exprs) => {
@@ -317,12 +337,13 @@ impl<'a> Expr<'a, Typed<'a>> {
                 Ok(NamedTuple(eval_pairs).into())
             }
             Expr::NewFunc {
-                expr_type: _,
-                arg_pattern,
+                expr_type: Typed(ValType::Func(arg_type, ret_type)),
+                params,
                 body,
             } => Ok(Val::Func(Func::Intern(InternFunc {
-                ret_type: body.get_type(),
-                arg_pattern,
+                ret_type: *ret_type,
+                arg_type: *arg_type,
+                arg_pattern: Pattern::from_iter(params),
                 body: *body,
                 captured_ctx: ctx.clone(),
             }))),
@@ -342,13 +363,16 @@ impl<'a> Expr<'a, Typed<'a>> {
                 expr_type: _,
                 func_name,
                 arg,
-            } => match ctx.get(func_name).cloned() {
-                Some(Val::Func(func)) => func
-                    .call(arg.eval(ctx)?)
-                    .map_err(|err| EvalError::CallError(func_name.into(), err)),
-                Some(_) => Err(EvalError::NotAFunction(func_name.into())),
-                None => Err(EvalError::InvalidReference(func_name.into())),
-            },
+            } => {
+                let arg = arg.eval(ctx)?;
+                match ctx.get(func_name) {
+                    Some(Val::Func(func)) => func
+                        .call(arg)
+                        .map_err(|err| EvalError::CallError(func_name.into(), err)),
+                    Some(_) => Err(EvalError::NotAFunction(func_name.into())),
+                    None => Err(EvalError::InvalidReference(func_name.into())),
+                }
+            }
             Expr::Block {
                 expr_type: _,
                 mut exprs,
@@ -369,13 +393,15 @@ impl<'a> Expr<'a, Typed<'a>> {
                 main_branch,
                 else_branch,
             } => {
-                if cond
-                    .eval(ctx)?
-                    .unwrap_singular_tuple()
-                    .try_as_primitive()
-                    .and_then(|p| p.try_as_bool())
-                    .ok_or(EvalError::NotAConditional)?
-                {
+                let mut cond = cond.eval(ctx)?;
+                try_coerce(
+                    &cond.get_type(),
+                    &ValType::Bool,
+                    Some(&mut cond),
+                    CoercionStrategy::UNWRAP,
+                )
+                .map_err(|err| EvalError::NotAConditional(err))?;
+                if cond.try_as_primitive().unwrap().try_as_bool().unwrap() {
                     main_branch.eval(ctx)
                 } else if let Some(else_branch) = else_branch {
                     else_branch.eval(ctx)
@@ -389,9 +415,10 @@ impl<'a> Expr<'a, Typed<'a>> {
                 rhs,
             } => {
                 let rhs = rhs.eval(ctx)?;
-                lhs.destruct_val(rhs.clone(), ctx)?;
+                lhs.destruct_val(rhs.clone(), ctx, CoercionStrategy::let_pattern())?;
                 Ok(rhs)
             }
+            _ => Err(EvalError::MalformedExpr(format!("{:?}", self))),
         }
     }
 }

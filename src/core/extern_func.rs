@@ -27,7 +27,7 @@ where
 
 #[derive(Clone)]
 pub struct ExternFunc<'a> {
-    pub(super) arg_pattern: Pattern<'a>,
+    pub(super) arg_type: ValType<'a>,
     pub(super) ret_type: ValType<'a>,
     pub(super) func_name: &'a str,
     pub(super) body: &'a dyn ExternCallable<'a>,

@@ -4,7 +4,7 @@ mod types;
 
 #[cfg(test)]
 mod tests {
-    use crate::core::{extern_func, Expr, ExternCallError, Pattern, Val, ValCtx, ValType};
+    use crate::core::{extern_func, Expr, ExternCallError, Val, ValCtx, ValType};
 
     #[test]
     fn integration_basic() {
@@ -13,7 +13,7 @@ mod tests {
             r#"{
                 let x: uint = 5;
                 let y: bool = true;
-                if (y) { x } else { 6 }
+                if y x else 6
             }"#,
         )
         .unwrap()
@@ -47,7 +47,7 @@ mod tests {
         let add = extern_func!((a: usize, b: usize) => a + b);
         ctx.register_func(
             "add",
-            Pattern::NamedTuple(vec![("a", ValType::Uint), ("b", ValType::Uint)]),
+            vec![("a", ValType::Uint), ("b", ValType::Uint)],
             ValType::Uint,
             &add,
         );
@@ -67,13 +67,13 @@ mod tests {
         let sub = extern_func!((a: usize, b: usize) => a - b);
         ctx.register_func(
             "+",
-            Pattern::NamedTuple(vec![("a", ValType::Uint), ("b", ValType::Uint)]),
+            vec![("a", ValType::Uint), ("b", ValType::Uint)],
             ValType::Uint,
             &add,
         );
         ctx.register_func(
             "-",
-            Pattern::NamedTuple(vec![("a", ValType::Uint), ("b", ValType::Uint)]),
+            vec![("a", ValType::Uint), ("b", ValType::Uint)],
             ValType::Uint,
             &sub,
         );
@@ -103,7 +103,7 @@ mod tests {
         let mut ctx = ValCtx::default();
         let res = Expr::parse(
             r#"{
-                let Employee: func(hours: uint, salary: uint) (hours: uint, salary: uint) = func(hours: uint, salary: uint) (hours=hours, salary=salary);
+                let Employee = func(hours: uint, salary: uint) (hours=hours, salary=salary);
                 let utkan: (hours: uint, salary: uint) = Employee(hours=1000, salary=0);
                 (utkan.hours, utkan.salary)
             }"#,
@@ -121,8 +121,9 @@ mod tests {
         let mut ctx = ValCtx::default();
         let res = Expr::parse(
             r#"{
+                let test1: uint = ((5));
                 let test2: func(uint) uint = func(a: uint) a;
-                let test3: (uint, ()) = (a=5, b=());
+                let test3: func(uint) uint = if true { let f: func(uint) uint = func(a: uint) a; f } else { let f: func(uint) uint = func(b: uint) b; f };
                 ()
             }"#,
         )

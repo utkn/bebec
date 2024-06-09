@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bitflags = "2.5.0"
 itertools = "0.13.0"
 strum = { version = "0.26.2", features = ["strum_macros", "derive"] }
 thiserror = "1.0.61"

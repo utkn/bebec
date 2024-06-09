@@ -1,28 +1,41 @@
-use std::collections::HashMap;
+use crate::core::{Expr, Pattern, PatternBuildError, Primitive, Untyped, ValType};
 
-use crate::core::{Expr, Pattern, Primitive, Untyped, ValType};
+pub mod constants {
+    pub const TYPE_STRING: &str = "str";
+    pub const TYPE_CHAR: &str = "char";
+    pub const TYPE_UINT: &str = "uint";
+    pub const TYPE_BOOL: &str = "bool";
+    pub const LET: &str = "let";
+    pub const IF: &str = "if";
+    pub const ELSE: &str = "else";
+    pub const FUNC: &str = "func";
+    pub const TUPLE_SEP: &str = ",";
+    pub const EXPR_SEP: &str = ";";
+    pub const ASSIGN: &str = "=";
+    pub const TYPE_SEP: &str = ":";
+    pub const ACCESS: &str = ".";
 
-const SYMBOLS: &[&str] = &[
-    "=", // assignment
-    "!=", "==", "<=", ">=", "||", "&&", "!", "<", ">", // boolean
-    "+", "-", "*", "/", "**", // arithmetic
-    "[", "]", "(", ")", "{", "}", // delimiters
-    ".", // access
-    ";", ",", ":", // misc
-];
+    pub const SYMBOLS: &[&str] = &[
+        ASSIGN, // assignment
+        "!=", "==", "<=", ">=", "||", "&&", "!", "<", ">", // boolean
+        "+", "-", "*", "/", "**", // arithmetic
+        "[", "]", "(", ")", "{", "}", // delimiters
+        EXPR_SEP, TUPLE_SEP, TYPE_SEP, // misc
+        ACCESS,   // access
+    ];
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Token<'a> {
-    Symbol(&'a str),
     Word(&'a str),
     Numeric(&'a str),
-    Unknown(&'a str),
 }
 
 impl<'a> Token<'a> {
+    /// Returns the contents of this token.
     pub fn contents(&self) -> &'a str {
         match self {
-            Token::Numeric(s) | Token::Symbol(s) | Token::Word(s) | Token::Unknown(s) => s,
+            Token::Numeric(s) | Token::Word(s) => s,
         }
     }
 }
@@ -37,7 +50,17 @@ impl<'a> Lexer<'a> {
         Self { source }
     }
 
-    pub fn peek(&mut self) -> Option<Token<'a>> {
+    fn peek_one_escaped(&mut self) -> Option<&'a str> {
+        let mut it = self.source.char_indices();
+        match (it.next()?, it.next()) {
+            // if the next character is an escape sequence, return the first two characters
+            ((_, '\\'), Some((i, _))) => Some(&self.source[..i + 1]),
+            // otherwise, simply return the first character
+            ((i, _), _) => Some(&self.source[..i + 1]),
+        }
+    }
+
+    pub fn peek_token(&mut self) -> Option<Token<'a>> {
         self.source = self.source.trim_start();
         if self.source.is_empty() {
             return None;
@@ -50,9 +73,9 @@ impl<'a> Lexer<'a> {
             .char_indices()
             .rev()
             .map(|(i, _)| i + 1)
-            .find(|i| SYMBOLS.contains(&&l[..*i]))
+            .find(|i| constants::SYMBOLS.contains(&&l[..*i]))
         {
-            return Some(Token::Symbol(&l[..sym_idx]));
+            return Some(Token::Word(&l[..sym_idx]));
         }
         if let Some(num_idx) = l
             .char_indices()
@@ -70,14 +93,36 @@ impl<'a> Lexer<'a> {
         {
             return Some(Token::Word(&l[..word_idx]));
         }
-        Some(Token::Unknown(l))
+        Some(Token::Word(l))
     }
 
-    pub fn next(&mut self) -> Option<Token<'a>> {
-        let token = self.peek()?;
+    pub fn next_token(&mut self) -> Option<Token<'a>> {
+        let token = self.peek_token()?;
         self.source = &self.source[token.contents().len()..];
         Some(token)
     }
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ParseError {
+    #[error("unknown token")]
+    BadToken,
+    #[error("expected token {0:?}")]
+    ExpectedToken(String),
+    #[error("expected some word")]
+    ExpectedWord,
+    #[error("unexpected eof")]
+    UnexpectedEof,
+    #[error("unexpected type")]
+    ExpectedType,
+    #[error("unexpected pattern")]
+    ExpectedPattern,
+    #[error("not a pattern: {0:?}")]
+    InvalidPattern(#[from] PatternBuildError),
+    #[error("not a numeric: {0:?}")]
+    ParseIntError(#[from] std::num::ParseIntError),
+    #[error("not a boolean: {0:?}")]
+    ParseBoolError(#[from] std::str::ParseBoolError),
 }
 
 #[derive(Debug, Clone)]
@@ -90,159 +135,185 @@ impl<'a> PrattParser<'a> {
         Self { lexer }
     }
 
-    fn try_consume(&mut self, pred: impl FnOnce(Token<'a>) -> bool) -> Option<Token<'a>> {
-        if pred(self.lexer.peek()?) {
-            self.lexer.next()
+    fn try_consume<'b>(&mut self, word_contents: &'b str) -> Result<Token<'a>, ParseError> {
+        if (self.lexer.peek_token().ok_or(ParseError::UnexpectedEof)?) == Token::Word(word_contents)
+        {
+            Ok(self.lexer.next_token().unwrap())
         } else {
-            None
+            Err(ParseError::ExpectedToken(word_contents.into()))
         }
     }
 
-    fn check_next_pair(
-        &self,
-        pred_1: impl FnOnce(Token<'a>) -> bool,
-        pred_2: impl FnOnce(Token<'a>) -> bool,
-    ) -> bool {
-        let mut test = self.clone();
-        test.try_consume(pred_1).is_some() && test.try_consume(pred_2).is_some()
+    fn try_consume_non_symbol(&mut self) -> Result<Token<'a>, ParseError> {
+        if matches!(
+            self.lexer.peek_token().ok_or(ParseError::UnexpectedEof)?,
+            Token::Word(s) if !constants::SYMBOLS.contains(&s)
+        ) {
+            Ok(self.lexer.next_token().unwrap())
+        } else {
+            Err(ParseError::ExpectedWord)
+        }
     }
 
-    fn parse_type(&mut self) -> Option<ValType<'a>> {
-        match self.lexer.peek() {
-            Some(Token::Word("bool")) => {
-                self.lexer.next().unwrap();
-                Some(ValType::Bool)
+    fn check_non_symbol_and<'b>(&self, token_after_word: &'b str) -> bool {
+        let mut test = self.clone();
+        test.try_consume_non_symbol().is_ok() && test.try_consume(token_after_word).is_ok()
+    }
+
+    fn parse_bindings_opt(&mut self) -> Result<Vec<(&'a str, Option<ValType<'a>>)>, ParseError> {
+        let mut inner_types = Vec::new();
+        loop {
+            let Ok(Token::Word(key)) = self.try_consume_non_symbol() else {
+                break;
+            };
+            let key_type = self
+                .try_consume(constants::TYPE_SEP)
+                .and_then(|_| self.parse_type())
+                .ok();
+            inner_types.push((key, key_type));
+            if self.try_consume(constants::TUPLE_SEP).is_err() {
+                break;
             }
-            Some(Token::Word("uint")) => {
-                self.lexer.next().unwrap();
-                Some(ValType::Uint)
+        }
+        Ok(inner_types)
+    }
+
+    fn parse_bindings(&mut self) -> Result<Vec<(&'a str, ValType<'a>)>, ParseError> {
+        let mut inner_types = Vec::new();
+        loop {
+            let Ok(Token::Word(key)) = self.try_consume_non_symbol() else {
+                break;
+            };
+            self.try_consume(constants::TYPE_SEP)?;
+            let key_type = self.parse_type()?;
+            inner_types.push((key, key_type));
+            if self.try_consume(constants::TUPLE_SEP).is_err() {
+                break;
             }
-            Some(Token::Word("char")) => {
-                self.lexer.next().unwrap();
-                Some(ValType::Char)
+        }
+        Ok(inner_types)
+    }
+
+    fn parse_tuple_type_inner(&mut self) -> Result<ValType<'a>, ParseError> {
+        let is_named = self.check_non_symbol_and(constants::TYPE_SEP);
+        if is_named {
+            // named tuple type
+            let mut inner_types = self.parse_bindings()?;
+            Ok(ValType::NamedTuple(inner_types))
+        } else {
+            // ordered tuple type
+            let mut inner_types = Vec::new();
+            while let Ok(ty) = self.parse_type() {
+                inner_types.push(ty);
+                if self.try_consume(constants::TUPLE_SEP).is_err() {
+                    break;
+                }
             }
-            Some(Token::Word("str")) => {
-                self.lexer.next().unwrap();
-                Some(ValType::String)
+            Ok(ValType::OrderedTuple(inner_types))
+        }
+    }
+
+    fn parse_type(&mut self) -> Result<ValType<'a>, ParseError> {
+        match self.lexer.peek_token() {
+            Some(Token::Word(constants::TYPE_BOOL)) => {
+                self.lexer.next_token().unwrap();
+                Ok(ValType::Bool)
             }
-            Some(Token::Word("func")) => {
-                self.lexer.next().unwrap();
+            Some(Token::Word(constants::TYPE_UINT)) => {
+                self.lexer.next_token().unwrap();
+                Ok(ValType::Uint)
+            }
+            Some(Token::Word(constants::TYPE_CHAR)) => {
+                self.lexer.next_token().unwrap();
+                Ok(ValType::Char)
+            }
+            Some(Token::Word(constants::TYPE_STRING)) => {
+                self.lexer.next_token().unwrap();
+                Ok(ValType::String)
+            }
+            Some(Token::Word(constants::FUNC)) => {
+                self.lexer.next_token().unwrap();
                 let arg_type = self.parse_type()?;
                 let ret_type = self.parse_type()?;
-                Some(ValType::Func(Box::new(arg_type), Box::new(ret_type)))
+                Ok(ValType::Func(Box::new(arg_type), Box::new(ret_type)))
             }
-            Some(Token::Symbol("(")) => {
-                self.lexer.next().unwrap();
-                let is_named = self
-                    .check_next_pair(|t| matches!(t, Token::Word(_)), |t| t == Token::Symbol(":"));
-                let ty = if is_named {
-                    // named tuple type
-                    let mut inner_types = Vec::new();
-                    loop {
-                        let Some(Token::Word(key)) =
-                            self.try_consume(|t| matches!(t, Token::Word(_)))
-                        else {
-                            break;
-                        };
-                        self.try_consume(|t| t == Token::Symbol(":"))?;
-                        let key_type = self.parse_type()?;
-                        inner_types.push((key, key_type));
-                        if self.try_consume(|t| t == Token::Symbol(",")).is_none() {
-                            break;
-                        }
-                    }
-                    ValType::NamedTuple(inner_types)
-                } else {
-                    // ordered tuple type
-                    let mut inner_types = Vec::new();
-                    while let Some(ty) = self.parse_type() {
-                        inner_types.push(ty);
-                        if self.try_consume(|t| t == Token::Symbol(",")).is_none() {
-                            break;
-                        }
-                    }
-                    ValType::OrderedTuple(inner_types)
-                };
-                self.try_consume(|t| t == Token::Symbol(")"))?;
-                Some(ty)
+            Some(Token::Word("(")) => {
+                self.lexer.next_token().unwrap();
+                let ty = self.parse_tuple_type_inner()?;
+                self.try_consume(")")?;
+                Ok(ty)
             }
-            _ => None,
+            _ => Err(ParseError::ExpectedType),
         }
     }
 
-    fn parse_pattern(&mut self) -> Option<Pattern<'a>> {
-        match self.lexer.peek() {
-            Some(Token::Symbol("(")) => {
-                let tuple_type = self.parse_type()?;
-                Some(Pattern::from_type(&tuple_type))
-            }
-            Some(Token::Word(_)) => {
-                let t = self.try_consume(|t| matches!(t, Token::Word(_))).unwrap();
-                let pat_name = t.contents();
-                self.try_consume(|t| t == Token::Symbol(":"))?;
-                let pat_type = self.parse_type()?;
-                Some(Pattern::Single(pat_name, pat_type))
-            }
-            _ => None,
+    fn parse_pattern(&mut self) -> Result<Pattern<'a>, ParseError> {
+        let with_parens = self.try_consume("(").is_ok();
+        let bindings = self.parse_bindings_opt()?;
+        if with_parens {
+            self.try_consume(")")?;
         }
+        Ok(Pattern::from_iter(bindings))
     }
 
-    fn parse_new_tuple_expr(&mut self) -> Option<Expr<'a, Untyped>> {
-        self.try_consume(|t| t == Token::Symbol("("))?;
-        let is_named =
-            self.check_next_pair(|t| matches!(t, Token::Word(_)), |t| t == Token::Symbol("="));
+    fn parse_new_tuple_expr(&mut self) -> Result<Expr<'a, Untyped>, ParseError> {
+        self.try_consume("(")?;
+        let is_named = self.check_non_symbol_and(constants::ASSIGN);
         if is_named {
             let mut expr_pairs = Vec::new();
             loop {
-                let Some(Token::Word(key)) = self.try_consume(|t| matches!(t, Token::Word(_)))
-                else {
+                let Ok(Token::Word(key)) = self.try_consume_non_symbol() else {
                     break;
                 };
-                self.try_consume(|t| t == Token::Symbol("="))?;
+                self.try_consume(constants::ASSIGN)?;
                 let rhs = self.parse_expr(0)?;
                 expr_pairs.push((key, rhs));
-                if self.try_consume(|t| t == Token::Symbol(",")).is_none() {
+                if self.try_consume(constants::TUPLE_SEP).is_err() {
                     break;
                 }
             }
-            self.try_consume(|t| t == Token::Symbol(")"))?;
-            Some(Expr::NewNamedTuple(Untyped, expr_pairs))
+            self.try_consume(")")?;
+            Ok(Expr::NewNamedTuple(Untyped, expr_pairs))
         } else {
             let mut exprs = Vec::new();
-            while let Some(expr) = self.parse_expr(0) {
+            while let Ok(expr) = self.parse_expr(0) {
                 exprs.push(expr);
-                if self.try_consume(|t| t == Token::Symbol(",")).is_none() {
+                if self.try_consume(constants::TUPLE_SEP).is_err() {
                     break;
                 }
             }
-            self.try_consume(|t| t == Token::Symbol(")"))?;
-            Some(Expr::NewOrderedTuple(Untyped, exprs))
+            self.try_consume(")")?;
+            Ok(Expr::NewOrderedTuple(Untyped, exprs))
         }
     }
 
-    fn parse_let_expr(&mut self) -> Option<Expr<'a, Untyped>> {
-        self.try_consume(|t| t == Token::Word("let"))?;
+    fn parse_let_expr(&mut self) -> Result<Expr<'a, Untyped>, ParseError> {
+        self.try_consume(constants::LET)?;
         let lhs = self.parse_pattern()?;
-        self.try_consume(|t| t == Token::Symbol("="))?;
+        self.try_consume(constants::ASSIGN)?;
         let rhs = self.parse_expr(0)?;
-        return Some(Expr::Let {
+        return Ok(Expr::Let {
             expr_type: Untyped,
             lhs,
             rhs: Box::new(rhs),
         });
     }
 
-    fn parse_if_expr(&mut self) -> Option<Expr<'a, Untyped>> {
-        self.try_consume(|t| t == Token::Word("if"))?;
+    fn parse_if_expr(&mut self) -> Result<Expr<'a, Untyped>, ParseError> {
+        self.try_consume(constants::IF)?;
         let cond = self.parse_expr(0)?;
         let main_branch = self.parse_expr(0)?;
-        let else_branch = if self.lexer.peek().is_some_and(|t| t == Token::Word("else")) {
-            self.lexer.next()?;
+        let else_branch = if self
+            .lexer
+            .peek_token()
+            .is_some_and(|t| t == Token::Word(constants::ELSE))
+        {
+            self.lexer.next_token().unwrap();
             Some(self.parse_expr(0)?)
         } else {
             None
         };
-        return Some(Expr::If {
+        return Ok(Expr::If {
             expr_type: Untyped,
             cond: Box::new(cond),
             main_branch: Box::new(main_branch),
@@ -250,52 +321,52 @@ impl<'a> PrattParser<'a> {
         });
     }
 
-    fn parse_new_func_expr(&mut self) -> Option<Expr<'a, Untyped>> {
-        self.lexer.next()?;
-        let arg_pattern = self.parse_pattern()?;
+    fn parse_new_func_expr(&mut self) -> Result<Expr<'a, Untyped>, ParseError> {
+        self.try_consume(constants::FUNC)?;
+        self.try_consume("(")?;
+        let params = self.parse_bindings()?;
+        self.try_consume(")")?;
         let body = self.parse_expr(0)?;
-        return Some(Expr::NewFunc {
+        return Ok(Expr::NewFunc {
             expr_type: Untyped,
-            arg_pattern,
+            params,
             body: Box::new(body),
         });
     }
 
-    pub fn parse_expr(&mut self, min_bp: usize) -> Option<Expr<'a, Untyped>> {
-        let mut lhs = match self.lexer.peek() {
+    pub fn parse_expr(&mut self, min_bp: usize) -> Result<Expr<'a, Untyped>, ParseError> {
+        let mut lhs = match self.lexer.peek_token() {
             Some(Token::Numeric(num)) => {
-                self.lexer.next().unwrap();
-                Expr::NewPrimitive(Untyped, Primitive::Uint(num.parse().ok()?))
+                self.lexer.next_token().unwrap();
+                Expr::NewPrimitive(Untyped, Primitive::Uint(num.parse()?))
             }
             Some(Token::Word("true")) | Some(Token::Word("false")) => {
-                let bool_val = self.lexer.next().unwrap().contents();
-                Expr::NewPrimitive(Untyped, Primitive::Bool(bool_val.parse().ok()?))
+                let bool_val = self.lexer.next_token().unwrap().contents();
+                Expr::NewPrimitive(Untyped, Primitive::Bool(bool_val.parse()?))
             }
-            Some(Token::Word("let")) => self.parse_let_expr()?,
-            Some(Token::Word("if")) => self.parse_if_expr()?,
-            Some(Token::Word("func")) => self.parse_new_func_expr()?,
-            Some(Token::Symbol("(")) => self.parse_new_tuple_expr()?,
-            Some(Token::Symbol("{")) => {
-                self.lexer.next().unwrap();
+            Some(Token::Word(constants::LET)) => self.parse_let_expr()?,
+            Some(Token::Word(constants::IF)) => self.parse_if_expr()?,
+            Some(Token::Word(constants::FUNC)) => self.parse_new_func_expr()?,
+            Some(Token::Word("(")) => self.parse_new_tuple_expr()?,
+            Some(Token::Word("{")) => {
+                self.lexer.next_token().unwrap();
                 let mut exprs = Vec::new();
-                while let Some(expr) = self.parse_expr(0) {
+                while let Ok(expr) = self.parse_expr(0) {
                     exprs.push(expr);
-                    if self.try_consume(|t| t == Token::Symbol(";")).is_none() {
+                    if self.try_consume(constants::EXPR_SEP).is_err() {
                         break;
                     }
                 }
-                self.try_consume(|t| t == Token::Symbol("}"))?;
+                self.try_consume("}")?;
                 Expr::Block {
                     expr_type: Untyped,
                     exprs,
                 }
             }
-            Some(Token::Word(s)) => {
-                self.lexer.next().unwrap();
-                Expr::Ref(Untyped, s)
-            }
-            Some(Token::Symbol(s)) if prefix_binding(s).is_some() => {
-                self.lexer.next().unwrap();
+            Some(Token::Word(s))
+                if constants::SYMBOLS.contains(&s) && prefix_binding(s).is_some() =>
+            {
+                self.lexer.next_token().unwrap();
                 let prefix_binding = prefix_binding(s).unwrap();
                 let rhs = self.parse_expr(prefix_binding)?;
                 Expr::Call {
@@ -304,19 +375,23 @@ impl<'a> PrattParser<'a> {
                     arg: Box::new(rhs),
                 }
             }
-            _ => return None,
+            Some(Token::Word(s)) if !constants::SYMBOLS.contains(&s) => {
+                self.lexer.next_token().unwrap();
+                Expr::Ref(Untyped, s)
+            }
+            _ => return Err(ParseError::BadToken),
         };
         loop {
-            match self.lexer.peek() {
+            match (&lhs, self.lexer.peek_token()) {
                 // infix operator.
-                Some(Token::Symbol(op))
+                (_, Some(Token::Word(op)))
                     if infix_binding(op).is_some_and(|(l_bp, _)| l_bp >= min_bp) =>
                 {
-                    self.lexer.next();
+                    self.lexer.next_token();
                     let (_, r_bp) = infix_binding(op).unwrap();
                     let rhs = self.parse_expr(r_bp)?;
                     lhs = match rhs {
-                        Expr::Ref(_, field_name) if op == "." => Expr::Access {
+                        Expr::Ref(_, field_name) if op == constants::ACCESS => Expr::Access {
                             expr_type: Untyped,
                             lhs: Box::new(lhs),
                             field_name,
@@ -328,28 +403,23 @@ impl<'a> PrattParser<'a> {
                         },
                     }
                 }
-                _ => match lhs {
-                    // another expression after a ref expression
-                    // treat the callee as a prefix operator with a binding of `CALL_BINDING`
-                    Expr::Ref(_, r) => {
-                        let Some(arg) = self.parse_expr(CALL_BINDING) else {
-                            break;
-                        };
-                        lhs = Expr::Call {
-                            expr_type: Untyped,
-                            func_name: r,
-                            arg: Box::new(arg),
-                        }
+                // start of a new tuple expression after a ref expression means we are performing a function call
+                (Expr::Ref(_, r), Some(Token::Word("("))) => {
+                    let Ok(arg) = self.parse_new_tuple_expr() else {
+                        break;
+                    };
+                    lhs = Expr::Call {
+                        expr_type: Untyped,
+                        func_name: r,
+                        arg: Box::new(arg),
                     }
-                    _ => break,
-                },
+                }
+                _ => break,
             };
         }
-        Some(lhs)
+        Ok(lhs)
     }
 }
-
-const CALL_BINDING: usize = usize::MAX;
 
 fn prefix_binding(s: &str) -> Option<usize> {
     match s {
@@ -365,19 +435,13 @@ fn infix_binding(s: &str) -> Option<(usize, usize)> {
         "*" | "/" => Some((7, 8)),
         "&&" | "||" => Some((7, 8)),
         "==" | "!=" | "<" | ">" | "<=" | ">=" => Some((4, 5)),
-        "." => Some((14, 13)),
+        constants::ACCESS => Some((14, 13)),
         _ => None,
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("error while parsing {0}")]
-pub struct ParseError(String);
-
 impl<'a> Expr<'a, Untyped> {
     pub fn parse(s: &'a str) -> Result<Self, ParseError> {
-        PrattParser::new(Lexer::new(s))
-            .parse_expr(0)
-            .ok_or(ParseError(":(".into()))
+        PrattParser::new(Lexer::new(s)).parse_expr(0)
     }
 }

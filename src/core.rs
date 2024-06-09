@@ -4,15 +4,14 @@ mod expression;
 mod extern_func;
 mod pattern;
 
-use std::collections::{BTreeMap, HashMap};
-
 use crate::types::Representible;
 
 pub use coercion::*;
 pub use context::ValCtx;
 pub use expression::{EvalError, Expr, Typed, Untyped};
 pub(crate) use extern_func::{extern_func, ExternCallError, ExternCallable, ExternFunc};
-pub use pattern::{DestructError, Pattern};
+use itertools::Itertools;
+pub use pattern::{DestructError, Pattern, PatternBuildError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OrderedTuple<'a>(pub Vec<Val<'a>>);
@@ -37,6 +36,14 @@ impl<'a> OrderedTuple<'a> {
     /// Returns the type of the ordered tuple.
     pub fn get_type(&self) -> ValType<'a> {
         ValType::OrderedTuple(self.0.iter().map(Val::get_type).collect())
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Val<'a>> {
+        self.0.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Val<'a>> {
+        self.0.iter_mut()
     }
 }
 
@@ -113,7 +120,7 @@ pub enum Primitive {
 
 impl Primitive {
     /// Returns the type of the primitive.
-    pub fn get_type<'a>(&self) -> ValType<'a> {
+    pub fn get_primitive_type<'a>(&self) -> ValType<'a> {
         match self {
             Primitive::Uint(_) => ValType::Uint,
             Primitive::Bool(_) => ValType::Bool,
@@ -125,20 +132,23 @@ impl Primitive {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CallError {
-    #[error("error during external call: {0:?}")]
-    ExternCallError(#[from] ExternCallError),
-    #[error("error while destructuring: {0:?}")]
-    DestructError(#[from] DestructError),
+    #[error("function argument {0} cannot be represented as a pattern")]
+    MalformedArgError(String),
+    #[error("error while destructuring the argument: {0:?}")]
+    ArgDestructError(#[from] DestructError),
+    #[error("error while coercing the argument: {0:?}")]
+    ArgCoercionError(#[from] CoercionError),
     #[error("error while evaluating: {0:?}")]
     FuncEvalError(#[from] Box<EvalError>),
-    #[error("unmatched pattern")]
-    UnmatchedPattern,
+    #[error("error during external call: {0:?}")]
+    ExternCallError(#[from] ExternCallError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InternFunc<'a, T> {
-    ret_type: ValType<'a>,
+    arg_type: ValType<'a>,
     arg_pattern: Pattern<'a>,
+    ret_type: ValType<'a>,
     captured_ctx: ValCtx<'a>,
     body: Expr<'a, T>,
 }
@@ -150,12 +160,6 @@ pub enum Func<'a, T> {
 }
 
 impl<'a> Func<'a, Typed<'a>> {
-    pub fn arg_pattern(&self) -> &Pattern<'a> {
-        match self {
-            Func::Intern(InternFunc { arg_pattern, .. })
-            | Func::Extern(ExternFunc { arg_pattern, .. }) => arg_pattern,
-        }
-    }
     pub fn call(&self, arg: Val<'a>) -> Result<Val<'a>, CallError> {
         match self {
             Func::Intern(InternFunc {
@@ -166,7 +170,7 @@ impl<'a> Func<'a, Typed<'a>> {
             }) => {
                 let mut func_ctx = captured_ctx.clone();
                 arg_pattern
-                    .destruct_val(arg, &mut func_ctx)
+                    .destruct_val(arg, &mut func_ctx, CoercionStrategy::arg_pattern())
                     .map_err(CallError::from)?;
                 body.clone()
                     .eval(&mut func_ctx)
@@ -211,19 +215,15 @@ impl<'a> Val<'a> {
     pub fn get_type(&self) -> ValType<'a> {
         match self {
             Val::Uninit(t) => t.clone(),
-            Val::Primitive(p) => p.get_type(),
+            Val::Primitive(p) => p.get_primitive_type(),
             Val::OrderedTuple(t) => t.get_type(),
             Val::NamedTuple(t) => t.get_type(),
             Val::Func(Func::Intern(InternFunc {
-                arg_pattern,
-                ret_type,
-                ..
+                arg_type, ret_type, ..
             }))
             | Val::Func(Func::Extern(ExternFunc {
-                arg_pattern,
-                ret_type,
-                ..
-            })) => ValType::Func(Box::new(arg_pattern.to_type()), Box::new(ret_type.clone())),
+                arg_type, ret_type, ..
+            })) => ValType::Func(Box::new(arg_type.clone()), Box::new(ret_type.clone())),
         }
     }
 
@@ -287,6 +287,37 @@ impl<'a> ValType<'a> {
             // Coerce a tuple with a single element into the inner value
             ValType::OrderedTuple(t) if t.len() == 1 => t.get(0).unwrap(),
             _ => self,
+        }
+    }
+}
+
+impl<'a> std::fmt::Display for ValType<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValType::Uint => f.write_str(crate::parser::constants::TYPE_UINT),
+            ValType::Char => f.write_str(crate::parser::constants::TYPE_CHAR),
+            ValType::Bool => f.write_str(crate::parser::constants::TYPE_BOOL),
+            ValType::String => f.write_str(crate::parser::constants::TYPE_STRING),
+            ValType::OrderedTuple(types) => f.write_fmt(format_args!(
+                "({})",
+                types
+                    .iter()
+                    .map(ValType::to_string)
+                    .join(crate::parser::constants::TUPLE_SEP)
+            )),
+            ValType::NamedTuple(pairs) => f.write_fmt(format_args!(
+                "({})",
+                pairs
+                    .iter()
+                    .map(|(k, v)| format!("{}:{}", k, v.to_string()))
+                    .join(crate::parser::constants::TUPLE_SEP)
+            )),
+            ValType::Func(arg_ty, ret_ty) => f.write_fmt(format_args!(
+                "{} {} {}",
+                crate::parser::constants::FUNC,
+                arg_ty.to_string(),
+                ret_ty.to_string()
+            )),
         }
     }
 }
